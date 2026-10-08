@@ -6,9 +6,10 @@
 import { agyFamily } from './agy.js'
 import { claudeFamily } from './claude.js'
 import { codexFamily } from './codex.js'
+import { minimaxFamily } from './minimax.js'
 
 /** 全部族，顺序即 UI 展示顺序。 */
-export const FAMILIES = [codexFamily, claudeFamily, agyFamily]
+export const FAMILIES = [codexFamily, claudeFamily, agyFamily, minimaxFamily]
 
 /** 全部族的 id。 */
 export function familyIds() {

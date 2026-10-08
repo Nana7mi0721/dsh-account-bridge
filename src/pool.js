@@ -186,7 +186,36 @@ export class AccountBridgeAdapter {
     const task = (async () => {
       const account = await this.#store.read(accountId)
       if (!account) throw new Error(`account-bridge: account "${accountId}" disappeared during refresh`)
-      const auth = await family.refresh(this.#ctx, account, undefined)
+
+      // 冷却中的账号不再重试刷新。目录没有「失败缓存」，所以没有这道闸的话，
+      // 一条已经作废的刷新令牌会被**每一次** listModels 重新拿去打上游。
+      // 冷却时长沿用健康表里那套（AUTH 24h / QUOTA 5min / 其余 60s），与请求路径一致。
+      const cooling = this.#health.why(family.id, accountId, '*')
+      if (cooling && cooling.until > Date.now()) {
+        const error = new Error(`account-bridge: ${accountId} is cooling down (${cooling.reason})`)
+        error.code = 'COOLING'
+        throw error
+      }
+
+      let auth
+      try {
+        auth = await family.refresh(this.#ctx, account, undefined)
+      } catch (error) {
+        // 刷新失败也要记进冷却表，否则会连着出两个错：
+        // ① `account_bridge_accounts` 说这个账号「健康」，而它的模型一个都列不出来
+        //    （目录是靠刷新后的 payload 去拉的），用户看到的是自相矛盾的两句话；
+        // ② 目录没缓存失败结果，于是每次 listModels 都会再拿那条已经作废的
+        //    刷新令牌去打一次上游 —— 一个死账号会变成持续的重试风暴（见上面那道闸）。
+        const verdict = classifyFailure(error, family.id)
+        const recorded = this.#health.record(family.id, accountId, '*', verdict)
+        this.#log?.warn?.(
+          'account-bridge: refreshing %s failed (%s)%s',
+          accountId,
+          redact(String(error?.code ?? error?.message ?? error)),
+          recorded > 0 ? `, cooling ${Math.round(recorded / 1000)}s` : '',
+        )
+        throw error
+      }
       const next = await this.#store.update(accountId, (current) =>
         current ? { ...current, auth: { ...current.auth, ...auth } } : undefined,
       )

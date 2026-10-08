@@ -58,34 +58,43 @@ const UNSHIPPED_SITES = [
 /**
  * 从一条记录里取出「稳定身份」参与哈希的字段。
  *
- * 顺序有讲究：**必须优先选不轮换的那个**。`access` 每次刷新都换，拿它做身份的话，
- * 同一条本机登录态在刷新前后会被当成两个不同的账号，于是「已导入」判断永远失效、
- * 一键导入会反复插入重复账号。
+ * 顺序踩过两次坑，现在的规则是：**稳定标识 → 文件位置 → 轮换的令牌**。
  *
- * `sourcePath` 排在 `access` 前面是有意的：一份只带 access token 的凭据，
- * 它的文件位置比那个会过期的令牌更能说明「这是哪一份登录态」。
- * 而 `access` 仍然要留在链尾——两个都没有的账号若都退到 label，会被误判成同一个，
+ * ① **不能用会轮换的令牌当身份**。`access` 每次刷新都换；`refresh` 在多数族里是长期的，
+ * 但 MiniMax Code 的 refresh token **每刷一次就轮换一次**。真机上第一次跑就撞上了：
+ * 插件刷新完把记录里的 refresh 换成新的，桌面端文件里还是旧的，两边指纹不一致 ⇒
+ * 下一次扫描把同一份登录态当成新账号，又导进来一个 `minimax-2`。
+ * 所以轮换的那几个（`refresh`/`refreshToken`/`access`）只能垫底。
+ *
+ * ② **有稳定标识时优先用它，而不是优先用路径**。一个族可能从多个候选位置摸到**同一份**
+ * 登录态（计划书 §3.13 的 Windows Local/Roaming 就是这种），只按路径认会把一份登录算成
+ * 两个账号；而稳定标识（accountId / loginEpoch / email）能把它们收拢成一个。
+ *
+ * ③ 没有稳定标识时才退到 `sourcePath`——它比会过期的令牌更能说明「这是哪一份登录态」。
+ * 各族因此有义务把自己的稳定标识摆进 `auth`：`codex` 有 `accountId`，`minimax` 有
+ * `loginEpoch`，`claude` 有 `email`，`agy` 有 `owner`。
+ *
+ * `access` 仍然留在链尾：两个都没有的账号若都退到 label，会被误判成同一个，
  * 表现为「第二个账号导不进来」，那比重复导入更难查。
  */
-function identityMaterial(item) {
-  const auth = item?.auth ?? {}
-  const chain = [
-    auth.accountId,
-    auth.account_id,
-    auth.refresh,
-    auth.refreshToken,
-    auth.apiKey,
-    auth.owner,
-    auth.kind,
-    auth.email,
-    item?.sourcePath,
-    auth.access,
-    item?.label,
-  ]
-  for (const value of chain) {
+const STABLE_IDENTITY_KEYS = ['accountId', 'account_id', 'apiKey', 'loginEpoch', 'email', 'owner']
+const ROTATING_IDENTITY_KEYS = ['refresh', 'refreshToken', 'access']
+
+function firstString(auth, keys) {
+  for (const key of keys) {
+    const value = auth?.[key]
     if (typeof value === 'string' && value.length > 0) return value
   }
-  return ''
+  return undefined
+}
+
+function identityMaterial(item) {
+  const auth = item?.auth ?? {}
+  const stable = firstString(auth, STABLE_IDENTITY_KEYS)
+  if (stable) return stable
+  const sourcePath = typeof item?.sourcePath === 'string' && item.sourcePath.length > 0 ? item.sourcePath : undefined
+  if (sourcePath) return sourcePath
+  return firstString(auth, ROTATING_IDENTITY_KEYS) ?? (typeof item?.label === 'string' ? item.label : '')
 }
 
 /**

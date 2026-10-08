@@ -35,6 +35,7 @@
 
 import { CliMissingError, killTree, resolveBin, runCli, spawnCli } from '../cli-run.js'
 import { buildPrompt, classifyAgyFailure, parseModels, translateAgyStream } from '../wire/agy.js'
+import { withSource } from '../util.js'
 
 /** PATH 上的默认可执行名；配置项 `agyBin` 可以覆盖成绝对路径。 */
 const DEFAULT_BIN = 'agy'
@@ -163,14 +164,14 @@ export const agyFamily = {
    * 这件事。所以记录里 `auth` 是一个标记对象，不是凭据。
    */
   recordFromDiscovery(item) {
-    return {
+    return withSource({
       family: 'agy',
       label: item.label ?? 'agy CLI（本机登录）',
       source: 'client-import',
       externallyOwned: true,
       auth: { ...CLI_AUTH },
       createdAt: new Date().toISOString(),
-    }
+    }, item)
   },
 
   // ---------------------------------------------------------------- 模型目录

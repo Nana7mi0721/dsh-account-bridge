@@ -86,7 +86,72 @@ test('identity survives a marker-only credential such as the agy one', () => {
   assert.notEqual(identityOf('agy', marker), identityOf('agy', { auth: { kind: 'cli', owner: 'other' } }))
 })
 
-// ------------------------------------------------------------------ 聚合
+test('a stored record keeps the identity of the item it came from, even after rotation', () => {
+  // 真机事故（第二次扫描凭空多出一个 `minimax-2`）：MiniMax Code 的 refresh token
+  // 每刷一次就轮换一次。身份链退到 `refresh` 上时，插件刷完令牌之后，桌面端那份
+  // **还没被写回**的旧文件就被当成了一个新账号，又被导入了一遍。
+  // 修法是让 minimax 的 auth 带上稳定标识 `loginEpoch`（桌面端每次登录生成的 UUID），
+  // 于是身份不再随令牌漂移。
+  const epoch = '0f0f0f0f-1111-2222-3333-444444444444'
+  const item = {
+    sourcePath: '/home/u/.minimax/auth/prod/en/mcode-public/auth.json',
+    auth: { access: 'mmoat_1', refresh: 'mmort_1', region: 'en', loginEpoch: epoch },
+  }
+  const record = { sourcePath: item.sourcePath, auth: { access: 'mmoat_1', refresh: 'mmort_1', loginEpoch: epoch } }
+  assert.equal(identityOf('minimax', record), identityOf('minimax', item), '记录与来源条目必须是同一个身份')
+
+  const rotated = { sourcePath: item.sourcePath, auth: { access: 'mmoat_2', refresh: 'mmort_2', loginEpoch: epoch } }
+  assert.equal(identityOf('minimax', rotated), identityOf('minimax', item), '轮换令牌不该改变身份')
+})
+
+test('the same account found at two candidate paths is still one account', () => {
+  // 计划书 §3.13 的候选顺序（Windows Local → Roaming）会让一个族从两个位置摸到同一份登录。
+  // 稳定标识要能把它们收拢成一个，而不是靠路径把它们劈成两个账号。
+  const first = { sourcePath: '/local/auth.json', auth: { accountId: 'acc_1' } }
+  const second = { sourcePath: '/roaming/auth.json', auth: { accountId: 'acc_1' } }
+  assert.equal(identityOf('codex', first), identityOf('codex', second))
+})
+
+test('the same path holding a different account is still a different account', () => {
+  // 同一个客户端里换了账号登录。只按路径认会让新账号被判成「已经导入过」而永远进不来。
+  const first = { sourcePath: '/a/auth.json', auth: { accountId: 'acc_1' } }
+  const second = { sourcePath: '/a/auth.json', auth: { accountId: 'acc_2' } }
+  assert.notEqual(identityOf('codex', first), identityOf('codex', second))
+})
+
+test('rescanning after a rotation still reports the account as already imported', async () => {
+  const { store } = makeStore()
+  const epoch = '0f0f0f0f-1111-2222-3333-444444444444'
+  const item = {
+    family: 'minimax',
+    sourcePath: '/home/u/.minimax/auth/prod/en/mcode-public/auth.json',
+    label: 'MiniMax Code（国际）',
+    importable: true,
+    externallyOwned: true,
+    auth: { access: 'mmoat_1', refresh: 'mmort_1', region: 'en', loginEpoch: epoch },
+  }
+  const family = fakeFamily('minimax', [item], {
+    recordFromDiscovery: (entry) => ({
+      family: 'minimax',
+      externallyOwned: true,
+      auth: entry.auth,
+      sourcePath: entry.sourcePath,
+    }),
+  })
+  const first = await discoverLocalAccounts({ families: [family], store })
+  await importDiscovered({ families: [family], store, scan: first, family: 'minimax' })
+
+  // 插件刷新过一轮：记录里是新令牌，磁盘上那份还没被写回的旧文件仍是旧令牌。
+  await store.update('minimax-1', (account) => ({
+    ...account,
+    auth: { ...account.auth, access: 'mmoat_2', refresh: 'mmort_2' },
+  }))
+
+  const again = await discoverLocalAccounts({ families: [family], store })
+  assert.equal(again.importable.length, 1, '同一份登录态只该出现一次')
+  assert.equal(again.importable[0]?.alreadyImported, true, '刷过令牌之后不该被当成新账号')
+})
+
 
 test('aggregates importable and non-importable entries across families', async () => {
   const { store } = makeStore()

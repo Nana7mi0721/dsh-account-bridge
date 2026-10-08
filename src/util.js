@@ -83,6 +83,19 @@ export function randomId(bytes = 16) {
   return base64url(crypto.getRandomValues(new Uint8Array(bytes)))
 }
 
+/**
+ * 把「这份登录态是从哪个文件来的」记进账号记录。
+ *
+ * 统一发现的指纹优先用 `sourcePath`（见 `src/discover.js` 的 `identityMaterial`），
+ * 所以导入进来的记录必须带上它——不带的话，拿记录重算指纹只能退到会轮换的令牌上，
+ * 于是「已经导入过」永远判不出来，每次扫描都会再插一个重复账号。
+ */
+export function withSource(record, item) {
+  return typeof item?.sourcePath === 'string' && item.sourcePath.length > 0
+    ? { ...record, sourcePath: item.sourcePath }
+    : record
+}
+
 /** 延时，可被 AbortSignal 打断。 */
 export function sleep(ms, signal) {
   return new Promise((resolve, reject) => {

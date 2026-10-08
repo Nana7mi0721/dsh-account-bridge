@@ -213,6 +213,53 @@ test('an empty response is classified as EMPTY_RESPONSE and allowed to fail over
   assert.equal(chunks[0].text, 'from second')
 })
 
+test('a failed refresh is recorded as a cooldown instead of leaving the account looking healthy', async () => {
+  // 真机上是这样暴露的：`account_bridge_accounts` 说 minimax 那个账号「健康」，
+  // 而 `llm.listModels('acct-minimax')` 返回空数组。因为目录要拿刷新后的 payload 去拉，
+  // 刷新一失败目录就空，而失败没进健康表 ⇒ 两句话互相矛盾，看不出是账号死了。
+  let refreshCalls = 0
+  const family = makeFamily({
+    needsRefresh: () => true,
+    async refresh() {
+      refreshCalls += 1
+      const error = new Error('invalid_grant: this refresh token can no longer be used')
+      error.code = 'AUTH'
+      throw error
+    },
+  })
+  const { adapter } = await makeAdapter(family, ['codex-1'])
+
+  assert.deepEqual(await adapter.listModels('acct-codex'), [], '刷新失败就该列不出模型')
+  assert.equal(refreshCalls, 1)
+  assert.match(
+    String(adapter.healthOf('codex', 'codex-1')),
+    /24\.0 小时后可用|小时后可用/,
+    'AUTH 失败要落成一条冷却，账号列表才不会说谎',
+  )
+})
+
+test('a cooling account is not asked to refresh again on every catalog lookup', async () => {
+  // 目录**不缓存失败**，所以没有这道闸的话，一条已经作废的刷新令牌会被每一次
+  // listModels 重新拿去打上游。真机上那条死令牌就是这么被反复使用的。
+  let refreshCalls = 0
+  const family = makeFamily({
+    needsRefresh: () => true,
+    async refresh() {
+      refreshCalls += 1
+      const error = new Error('invalid_grant')
+      error.code = 'AUTH'
+      throw error
+    },
+  })
+  const { adapter } = await makeAdapter(family, ['codex-1'])
+
+  await adapter.listModels('acct-codex')
+  await adapter.listModels('acct-codex')
+  await adapter.listModels('acct-codex')
+
+  assert.equal(refreshCalls, 1, '冷却期间不该再拿那条死令牌去打上游')
+})
+
 test('the plugin registers one route and one login flow per family', async () => {
   const host = createMockHost()
   try {

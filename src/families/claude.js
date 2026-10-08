@@ -19,7 +19,8 @@ import { join } from 'node:path'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
 import { resolveCliVersion } from '../cli-version.js'
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, translateAnthropicStream } from '../wire/anthropic.js'
-import { firstPositiveNumber, tryJson } from '../util.js'
+import { httpError } from '../wire/http-error.js'
+import { firstPositiveNumber, tryJson, withSource } from '../util.js'
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -110,7 +111,7 @@ export const claudeFamily = {
 
   /** 见 codex 族同名方法的说明：统一发现的落盘入口。 */
   recordFromDiscovery(item) {
-    return recordFromAuth(item.auth, item.label, 'client-import', true)
+    return withSource(recordFromAuth(item.auth, item.label, 'client-import', true), item)
   },
 
   // ---------------------------------------------------------------- 登录
@@ -129,7 +130,7 @@ export const claudeFamily = {
         const chosen = usable[0]
         await session.commit({
           kind: 'grant',
-          payload: recordFromAuth(chosen.auth, chosen.label, 'client-import', true),
+          payload: withSource(recordFromAuth(chosen.auth, chosen.label, 'client-import', true), chosen),
         })
         return
       }
@@ -508,35 +509,6 @@ function resetAt(value) {
   }
   if (typeof value !== 'number' || !Number.isFinite(value) || value <= 0) return undefined
   return value > 1e12 ? value : value * 1000
-}
-
-/** 非 2xx 响应 → 带 DSH provider 中立码的错误。 */
-export function httpError(response, text, who) {
-  const json = tryJson(text)
-  const detail = json?.error?.message ?? json?.message ?? text.slice(0, 300)
-  const error = new Error(`${who}: HTTP ${response.status} ${detail}`)
-  const retryAfter = Number(response.headers.get('retry-after'))
-  const providerRetryAfterMs = Number.isFinite(retryAfter) && retryAfter > 0 ? retryAfter * 1000 : undefined
-  error.code = mapStatus(response.status, detail)
-  error.failure = {
-    status: response.status,
-    code: error.code,
-    ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }),
-  }
-  return error
-}
-
-function mapStatus(status, detail = '') {
-  const text = String(detail).toLowerCase()
-  if (status === 401 || status === 403) return 'AUTH'
-  if (status === 429) {
-    if (text.includes('quota') || text.includes('usage limit') || text.includes('extra usage')) return 'QUOTA'
-    return 'RATE_LIMIT'
-  }
-  if (status === 402) return 'ACCOUNT_QUOTA'
-  if (status === 400 && text.includes('context')) return 'CONTEXT_WINDOW_EXCEEDED'
-  if (status === 408 || status === 504) return 'TIMEOUT'
-  return 'SERVER'
 }
 
 /** 把一次登录的结果整理成账号记录。 */

@@ -16,9 +16,10 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
+import { httpError } from '../wire/http-error.js'
 import { toResponsesInput, toResponsesTools, translateResponsesStream } from '../wire/responses.js'
 import { resolveCliVersion } from '../cli-version.js'
-import { decodeJwtPayload, firstPositiveNumber, randomId, tryJson } from '../util.js'
+import { decodeJwtPayload, firstPositiveNumber, randomId, tryJson, withSource } from '../util.js'
 
 export const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
@@ -119,7 +120,7 @@ export const codexFamily = {
    * 记录，否则「同一份本机登录态经不同路径导入」会变成两条互相不知道对方存在的账号。
    */
   recordFromDiscovery(item) {
-    return recordFromAuth(item.auth, item.label, 'client-import', true)
+    return withSource(recordFromAuth(item.auth, item.label, 'client-import', true), item)
   },
 
   // ---------------------------------------------------------------- 登录
@@ -148,7 +149,7 @@ export const codexFamily = {
                   }),
                 )
               ]
-        await session.commit({ kind: 'grant', payload: recordFromAuth(chosen.auth, chosen.label, 'client-import', true) })
+        await session.commit({ kind: 'grant', payload: withSource(recordFromAuth(chosen.auth, chosen.label, 'client-import', true), chosen) })
         return
       }
 
@@ -445,35 +446,4 @@ function normaliseReset(value) {
   return Date.now() + value * 1000
 }
 
-/** 非 2xx 响应 → 带 DSH provider 中立码的错误。 */
-export function httpError(response, text, who) {
-  const json = tryJson(text)
-  const detail = json?.error?.message ?? json?.message ?? text.slice(0, 300)
-  const error = new Error(`${who}: HTTP ${response.status} ${detail}`)
-  const retryAfter = Number(response.headers.get('retry-after'))
-  const providerRetryAfterMs =
-    Number.isFinite(retryAfter) && retryAfter > 0
-      ? retryAfter * 1000
-      : (() => {
-          const ms = Number(response.headers.get('retry-after-ms') ?? response.headers.get('x-retry-after-ms'))
-          return Number.isFinite(ms) && ms > 0 ? ms : undefined
-        })()
-  error.code = mapStatus(response.status, detail)
-  error.failure = {
-    status: response.status,
-    code: error.code,
-    ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }),
-  }
-  return error
-}
 
-function mapStatus(status, detail = '') {
-  const text = String(detail).toLowerCase()
-  if (status === 401 || status === 403) return 'AUTH'
-  if (status === 429) return text.includes('quota') || text.includes('usage limit') ? 'QUOTA' : 'RATE_LIMIT'
-  if (status === 402) return 'ACCOUNT_QUOTA'
-  if (status === 400 && text.includes('context')) return 'CONTEXT_WINDOW_EXCEEDED'
-  if (status >= 500) return 'SERVER'
-  if (status === 408 || status === 504) return 'TIMEOUT'
-  return 'SERVER'
-}

@@ -3,9 +3,11 @@
 把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
 统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
 
-> 状态：**P2.5**（骨架 + Codex 族 + Claude 族 + Antigravity 族 + 本机账号统一发现）。
-> 三条 route 已在真实 DSH 宿主里验证可见（provider / 模型目录 / 登录流 / 工具面）；
-> Antigravity 族已跑通真实推理；本机发现 → 一键导入 → 模型出现在选择器，这条链路已在真机上走通。
+> 状态：**P2.5 + MiniMax Code**（骨架 + Codex 族 + Claude 族 + Antigravity 族 + 本机账号统一发现
+> + `minimax` 族，即计划书 P6 的第一族）。
+> 四条 route 已在真实 DSH 宿主里验证可见（provider / 模型目录 / 登录流 / 工具面）；
+> Antigravity 与 MiniMax Code 两族已跑通真实推理；本机发现 → 一键导入 → 模型出现在选择器，
+> 这条链路已在真机上走通。
 > 尚未跑过 Codex/Claude 的真实登录，也还没有客户端 UI。
 
 ## 它和「key 级接入」的区别
@@ -38,6 +40,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 Codex 家族注册成 provider route（`acct-codex`，显示名 `ChatGPT (Codex)`） | ✅ 真机验证 |
 | 把 Claude 家族注册成 provider route（`acct-claude`，显示名 `Claude (Subscription)`） | ✅ 真机验证 |
 | 把 Antigravity 家族注册成 provider route（`acct-agy`，显示名 `Antigravity (Google)`） | ✅ 真机验证 |
+| 把 MiniMax Code 家族注册成 provider route（`acct-minimax`，显示名 `MiniMax Code`） | ✅ 真机推理通过 |
 | 模型目录进 GUI 选择器（账号池 = 所有账号目录的并集） | ✅ 真机验证（无账号时为空目录，不报错） |
 | 目录未知时**不宣称任何 reasoning effort**（不承诺兑现不了的东西） | ✅ 真机验证 |
 | 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude,agy}-login`） | ✅ 真机验证 |
@@ -49,12 +52,14 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 单测 + 真机（本机无该文件，如实返回空） |
 | 驱动本机 `agy` CLI 推理（NDJSON 流 → DSH chunk，含 usage 与失败归类） | ✅ 真机推理通过 |
 | 本机 agy 登录探测与导入（`agy models` 探针 + 14 个模型的真实目录解析） | ✅ 真机验证 |
+| 本机 MiniMax Code 登录态发现与导入（`~/.minimax/auth/prod/{en,cn}/mcode-public/auth.json`） | ✅ 真机验证 |
+| MiniMax Code 令牌刷新 + **写回桌面端**（generation CAS，防两边互相踩） | ✅ 真机验证（对真实文件跑通，令牌每刷必换是实测事实） |
 | Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
 | 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
 | 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 客户端设置界面（`settings.section` / 用量徽章） | ⛔ 未做 |
-| 其余族（WorkBuddy / Qoder / zcode / minimax / 通用兜底 `generic`） | ⛔ 未做（架构已就位，见 `src/families/`） |
+| 其余族（WorkBuddy / Qoder / zcode / 通用兜底 `generic`） | ⛔ 未做（架构已就位，见 `src/families/`） |
 
 ## Antigravity 族（`agy`）：四个实话
 
@@ -78,6 +83,57 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 
 配置项：`agyBin`（不在 PATH 上时给绝对路径）、`agyWorkdir`（agy 的工作目录，它是个 agent，
 会往 cwd 里写东西）。
+
+## MiniMax Code 族（`minimax`）：三个实话
+
+这一族直连 MiniMax Code 桌面端自己的网关（`https://agent.minimax.io/mavis/api/v1/llm/v1`），
+用的是桌面端登录时拿到的那套 OAuth 令牌，协议是标准的 Anthropic Messages。
+配置项：`MINIMAX_HOME`（默认 `~/.minimax`，测试/便携安装用；桌面端自己只认这个默认值）。
+
+1. **不做订阅 Key。** 宿主内置的 `minimax` / `minimax-cn` provider 已经能填 `MINIMAX_API_KEY`
+   走 `api.minimax.ai`，那是 key 级接入。mcode 的 OAuth 令牌与订阅 Key 是**两套凭据**——
+   拿 mcode 令牌去调 `token_plan/remains` 会被回 `status_code:1004 login fail: Please carry
+   the API secret key in the 'Authorization' field`，这是实测。
+2. **没有动态模型目录。** 往 `{网关}/models` 打一定 `503 {"errorCode":50115,
+   "errorReason":"direct_route_not_configured"}`，所以模型表就是 `~/.minimax/config.yaml` 里
+   声明的四条快照（M3 / M3.1-Flash-Preview / M2.7 / M2.7-highspeed），`listModels` 一个网络
+   请求都不发。好处是不会因为上游抽风把整族模型弄消失，代价是上游加新模型时得跟着改。
+3. **刷新令牌是一次性的，而令牌文件是桌面端的。** 这是本族唯一真正危险的地方，值得单独一节说。
+
+### 写回：为什么这一族要动桌面端的文件
+
+MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到新令牌的那一刻，旧令牌服务端
+立刻作废（实测 `400 invalid_grant: this refresh token can no longer be used`）。
+而令牌文件（`~/.minimax/auth/prod/<region>/mcode-public/auth.json`）是**桌面端和本插件共用的同一份**。
+
+于是只有两种结局：
+
+- **写回**：桌面端下次启动读到的就是新令牌，两边一直对齐。
+- **不写回**：服务端已经换成新的了，文件里还是旧的 ⇒ **用户下次打开 MiniMax Code 直接被要求重新登录**。
+
+所以 `minimax` 是唯一一个 `externallyOwned` 却**必然要写回**的族
+（其它族一律只读，见「设计要点」最后一条）。写回按桌面端自己的做法来：同目录临时文件 + rename、
+`generation` 做 CAS、先写凭据再写状态镜像。CAS 基准是**刷新前现读**的，不是导入时记下的那个。
+
+**开发期真出过事。** 写回最初拿 `auth.generation ?? 0` 当基准，而账号记录里根本没有这个字段 ⇒
+基准恒为 0、文件里是 16 ⇒ CAS 永远不匹配、永远静默不写。单测没抓住是因为测试自己贴心地
+传了和文件一致的 generation。真机跑完的表现是：推理成功、记录里的令牌也换了，
+**桌面端的文件纹丝不动**——服务端那条令牌已经作废。最后本机三个令牌（文件里的、探针备份里的、
+记录里的）全部 `invalid_grant`，只能重新登录。
+
+那次之后加了两道闸：
+
+- **读不到桌面端凭据就根本不刷。** 写不回去的刷新等于单方面把用户踢下线，而且不可逆，
+  所以宁可报 `AUTH` 让账号进冷却并提示「先打开 MiniMax Code 让它自己刷一轮」。
+  `test/minimax.test.js` 里 `an externally owned account refuses to refresh when the desktop
+  file is gone` 守着这条。
+- **`loginEpoch` 进身份指纹。** 上面那个 bug 还顺带让同一份登录态被导入了两次
+  （记录里是新令牌、文件里是旧令牌，指纹不一致 ⇒ 多出一个 `minimax-2`）。桌面端每次登录会
+  生成一个 `loginEpoch` UUID，它不随刷新变化，正好当稳定标识。
+
+仍然存在的**固有竞态**，说清楚：如果桌面端在我们这一来一回之间也刷了一次，双方必有一方的令牌
+作废。CAS 只保证「不互相覆盖」，保证不了「两边的请求不会同时飞出去」。真撞上时的表现是插件这边
+拿到 `invalid_grant` → AUTH → 账号进 24h 冷却，而桌面端是好的；重新导入一次即可。
 
 ## 本机账号统一发现（P2.5）
 
@@ -116,10 +172,13 @@ account_bridge_discover  { import: true }
 
 实现上值得一提的两点：
 
-- **「已经导入过」靠指纹比对，不靠新字段。** 指纹取凭据里**不轮换**的那部分
-  （`accountId` → `refresh` → … → 文件路径 → `access` → label），所以对 P2.5 之前写下的账号
-  同样有效。顺序里把 `access` 压到很后面、把文件路径放在它前面，是因为 access token 每次刷新都变：
-  拿它当身份，同一份登录态在刷新前后会被当成两个账号，一键导入就会反复插入重复条目。
+- **「已经导入过」靠指纹比对，不靠新字段。** 指纹取凭据里**不轮换**的那部分，顺序是
+  **稳定标识 → 文件路径 → 轮换的令牌 → label**（`accountId` / `loginEpoch` / `email` / `owner`
+  → `sourcePath` → `refresh` / `access`），所以对 P2.5 之前写下的账号同样有效。
+  这个顺序被真机教训改过两次：轮换的令牌（MiniMax Code 的 `refresh` 每刷必换）排在前面，
+  插件刷完令牌就会把同一份登录态当成新账号再导一遍；而反过来只按路径认，一个族从
+  Windows Local / Roaming 两个候选位置摸到同一份登录时又会被劈成两个账号。
+  各族因此有义务把自己的稳定标识摆进 `auth`。
 - **一个族挂住不能拖垮整次扫描。** 每族独立超时（默认 15s）并各自 catch；
   扫描的全部价值就在于「在用户还没指定族的时候把所有族都问一遍」，所以这里不能用 `Promise.all`。
 
@@ -157,12 +216,14 @@ src/
   wire/
     sse.js            SSE 解析
     responses.js      DSH 消息 ↔ OpenAI Responses API（Codex）
-    anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude）
+    anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude / MiniMax Code）
     agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
+    http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
     claude.js         Claude 族
     agy.js            Antigravity 族（驱动本机 agy CLI）
+    minimax.js        MiniMax Code 族（直连 mcode 网关 + 令牌写回桌面端）
     registry.js       族注册表
 ```
 
@@ -195,11 +256,16 @@ node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-有一例真机推理测试默认跳过（每回合要烧 27k tokens，不该在每次 `npm test` 时都跑）：
+当前：**95 个用例，94 通过，1 跳过**（跳过的那例是下面这个真机 agy 推理，每回合要烧 27k tokens，
+不该在每次 `npm test` 时都跑）：
 
 ```bash
 BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
 ```
+
+MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的，跑一次就消耗掉一条真实登录态。
+写回路径的验证方式是**拿真的 `auth.json`、只把令牌端点换成 stub**
+（`_dsh_research/mcode-writeback-e2e.mjs` 那种做法），跑完从备份还原。
 
 ## 设计要点
 
@@ -211,9 +277,15 @@ BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
   第一条 user 消息的 id（历史会被重放，所以这个键跨轮稳定）。
 - **刷新按账号合并 in-flight promise**：refresh token 通常一次性轮换，并发刷新会把账号踢下线。
   DSH 凭据记录的独占写只解决跨进程，解决不了同进程并发。
+- **刷新失败同样记冷却，冷却期间不再重试刷新**。模型目录是靠刷新后的 payload 去拉的，
+  刷新一失败目录就空；如果失败不进健康表，账号列表会一边说「健康」一边列出零个模型，
+  而且目录不缓存失败 ⇒ 每次 `listModels` 都会再拿那条已经作废的令牌去打一次上游。
 - **失败粒度是 `(族, 账号, 模型)`**：配额失败在按模型分线的族（Claude、Antigravity）只停那一格，
   其它族停整个账号；`400/422` 是请求本身的问题，**谁都不罚**。
-- **导入来的凭据是「外部所有」**：默认只读，刷新出的新令牌不回写对方的文件，避免和 CLI 互相踩。
+- **导入来的凭据默认只读**：刷新出的新令牌不回写对方的文件，避免和 CLI 互相踩。
+  唯一的例外是 `minimax`——它的刷新令牌是一次性的、而令牌文件是桌面端与本插件共用的，
+  不写回就等于把用户踢下线（见上面那一节）。加新族时**默认按只读处理**，
+  只有确实证明了「不写回会破坏对方」才开写回，并且必须带 CAS 基准。
 
 ## 未定事项
 
