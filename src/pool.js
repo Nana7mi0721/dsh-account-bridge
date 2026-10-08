@@ -464,6 +464,22 @@ export class AccountBridgeAdapter {
     }
   }
 
+  /**
+   * 手动解冻一个账号（或整族）。
+   *
+   * 冷却表是**纯内存派生状态**，重放一次同样的失败只会把它再记回来，代价是多一次
+   * 注定失败的请求——所以这个动作是安全的，不需要二次确认。返回被清掉的冷却条数。
+   */
+  unfreeze(familyId, accountId) {
+    const removed = this.#health.clearAccount(familyId, accountId)
+    // 冷却一变，池子装配与目录缓存都可能已经过时（被冻住的账号原本被排除在外）。
+    if (removed > 0) {
+      this.invalidateHealth()
+      this.invalidate(familyId)
+    }
+    return removed
+  }
+
   /** 一个账号当前的健康说明；健康时返回 undefined。 */
   healthOf(familyId, accountId) {
     const why = this.#health.why(familyId, accountId, '*')

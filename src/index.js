@@ -22,6 +22,7 @@ import { LoginBroker } from './login/broker.js'
 import { AccountBridgeAdapter } from './pool.js'
 import { AccountStore } from './store.js'
 import { registerAccountBridgeRoutes } from './api.js'
+import { COMMAND_NAME, createPoolCommand } from './commands.js'
 import { assertUniqueRoutes, selectFamilies } from './families/registry.js'
 import { createToolDefinitions } from './tools.js'
 import { discoverLocalAccounts } from './discover.js'
@@ -162,6 +163,23 @@ export function apply(ctx, config) {
         }
       }
     })
+  })
+
+  // 3.4) `/pool` 命令族：在对话框里直接问账号池，不产生模型消息、不烧额度。
+  ctx.inject(['commands'], (cmdCtx) => {
+    try {
+      const handle = cmdCtx.commands.register(createPoolCommand({
+        adapter,
+        store,
+        families,
+        ctx: familyContext,
+        log,
+      }))
+      cmdCtx.effect(() => disposeOf(handle))
+      log.info?.('account-bridge: registered /%s command', COMMAND_NAME)
+    } catch (error) {
+      log.warn?.('account-bridge: registering /%s failed: %s', COMMAND_NAME, error?.message ?? error)
+    }
   })
 
   // 3.5) 网页设置页的数据面。客户端插件跑在浏览器里，拿不到宿主对象，

@@ -29,6 +29,10 @@ window.__ModuleLoader__.load({
 
     /** 席位名。 */
     const SETTINGS_SLOT = 'settings.section'
+    /** 设置 → 模型 → 每张 provider 卡片下方的扩展位（keyed，key = settingsNs）。 */
+    const PROVIDER_CARD_SLOT = 'settings.models.provider-card'
+    /** 设置 → 模型 页脚（list 席位）。 */
+    const MODELS_FOOTER_SLOT = 'settings.models.footer'
 
     /** 数据面的基地址：**文档相对**，不带前导斜杠。 */
     const API = 'account-bridge'
@@ -100,6 +104,127 @@ window.__ModuleLoader__.load({
         }
       }
       return best
+    }
+
+    // ------------------------------------------------- 设置 → 模型 页上的摘要
+    //
+    // 模型页给每张 provider 卡片留了一个扩展位（`settings.models.provider-card`，
+    // keyed 席位，key 是该 provider 的 `settingsNs`）。我们的 11 条 `acct-*` 都**没有**
+    // 在「可配置 provider 目录」里声明过，于是 `joinProviderDirectory` 给它们填的
+    // `settingsNs` 就是空字符串 ⇒ 用 `key: ''` 注册一条，就能落到所有这些卡片上
+    // （组件内部再按 route 过滤，别人的卡片一律返回 null）。
+    //
+    // 摘要读同一个数据面，但**不自己轮询**：模型页一打开可能有十几张卡片，
+    // 每张各打一次 HTTP 就是十几次请求。这里用模块级共享快照，一次取数、
+    // 所有卡片订阅，且 30 秒内不重复取。
+
+    const SUMMARY_FRESH_MS = 30_000
+
+    const summaryStore = {
+      snapshot: { status: 'idle' },
+      at: 0,
+      inFlight: undefined,
+      listeners: new Set(),
+      subscribe(listener) {
+        this.listeners.add(listener)
+        return () => this.listeners.delete(listener)
+      },
+      emit() {
+        for (const listener of [...this.listeners]) listener()
+      },
+      /** 取一次账号池快照；同一时刻只有一个请求在飞，30 秒内复用上一次结果。 */
+      load(now = Date.now()) {
+        if (this.inFlight !== undefined) return this.inFlight
+        if (this.snapshot.status === 'ready' && now - this.at < SUMMARY_FRESH_MS) return undefined
+        this.inFlight = call('state')
+          .then((result) => {
+            this.snapshot = result.ok
+              ? { status: 'ready', families: result.value?.families ?? [] }
+              : { status: 'error', error: result.error }
+          })
+          .catch((error) => {
+            this.snapshot = { status: 'error', error: { code: 'TRANSPORT', message: String(error?.message ?? error) } }
+          })
+          .then(() => {
+            this.at = Date.now()
+            this.inFlight = undefined
+            this.emit()
+          })
+        return this.inFlight
+      },
+    }
+
+    /** 订阅账号池快照；首次挂载时触发一次取数。 */
+    function usePoolSummary() {
+      const [snapshot, setSnapshot] = React.useState(summaryStore.snapshot)
+      React.useEffect(() => {
+        const unsubscribe = summaryStore.subscribe(() => setSnapshot(summaryStore.snapshot))
+        summaryStore.load()
+        setSnapshot(summaryStore.snapshot)
+        return unsubscribe
+      }, [])
+      return snapshot
+    }
+
+    /** 一族池子状态的一句话。 */
+    function familySummary(family) {
+      const accounts = Array.isArray(family?.accounts) ? family.accounts : []
+      if (accounts.length === 0) {
+        const methods = (family?.loginMethods ?? []).map((method) => method.label).join(' / ')
+        return methods === '' ? '还没有账号' : `还没有账号 · 可用登录：${methods}`
+      }
+      const now = Date.now()
+      const disabled = accounts.filter((account) => account.disabled === true).length
+      const cooling = accounts.filter((account) => Number.isFinite(account.cooldownUntil) && account.cooldownUntil > now).length
+      const best = bestRemaining(accounts.filter((account) => account.disabled !== true))
+      const parts = [`${accounts.length} 个账号`]
+      if (disabled > 0) parts.push(`${disabled} 个已停用`)
+      if (cooling > 0) parts.push(`${cooling} 个冷却中`)
+      // 「查不到」与「就是 0%」必须写成两句话（计划书判据 C3）。
+      parts.push(best === undefined ? '额度未知' : `最佳剩余 ${percentText(best)}`)
+      return parts.join(' · ')
+    }
+
+    /** 挂在每一张「非可配置 provider」卡片下方的行内摘要。 */
+    function ProviderCardSummary(props) {
+      const providerId = props?.provider?.provider
+      const snapshot = usePoolSummary()
+      // 别人的卡片、以及还没取到数的这段时间，都什么都不画：
+      // 模型页出错时该由页脚说一句，而不是在十几张卡片上各喊一遍。
+      if (typeof providerId !== 'string' || providerId === '') return null
+      if (snapshot.status !== 'ready') return null
+      const family = (snapshot.families ?? []).find((candidate) => candidate.route === providerId)
+      if (family === undefined) return null
+      return h(
+        'div',
+        { className: 'dab-card-summary' },
+        h('span', { className: 'dab-card-summary-tag' }, '账号池'),
+        h('span', null, familySummary(family)),
+      )
+    }
+
+    /** 模型页页脚：整池的一句话 + 入口提示。 */
+    function ModelsFooter() {
+      const snapshot = usePoolSummary()
+      if (snapshot.status === 'idle') return null
+      if (snapshot.status === 'error') {
+        return h('div', { className: 'dab-card-summary dab-error' }, `账号池读取失败：${snapshot.error?.message ?? '未知错误'}`)
+      }
+      const families = snapshot.families ?? []
+      const accounts = families.flatMap((family) => (Array.isArray(family.accounts) ? family.accounts : []))
+      if (accounts.length === 0) {
+        return h('div', { className: 'dab-card-summary' }, '账号池还没有账号 · 在「设置 → 账号池」里登录，或直接问 /pool')
+      }
+      const now = Date.now()
+      const cooling = accounts.filter((account) => Number.isFinite(account.cooldownUntil) && account.cooldownUntil > now).length
+      const coolingText = cooling > 0 ? ` · ${cooling} 个冷却中` : ''
+      return h(
+        'div',
+        { className: 'dab-card-summary' },
+        h('span', { className: 'dab-card-summary-tag' }, '账号池'),
+        h('span', null, `${families.length} 族 · ${accounts.length} 个账号${coolingText}`),
+        h('span', { className: 'dab-card-summary-hint' }, '在「设置 → 账号池」里管理，或问 /pool'),
+      )
     }
 
     /** 一个额度窗口的进度条。 */
@@ -524,6 +649,9 @@ window.__ModuleLoader__.load({
 .dab-input{flex:1 1 auto;height:26px;padding:0 8px;border-radius:6px;border:1px solid var(--dsw-alias-border-l1,#d0d7de);background:var(--dsw-alias-bg-base,#fff);color:inherit;font-size:12px}
 .dab-proxy-hint{font-family:ui-monospace,SFMono-Regular,Menlo,monospace}
 .dab-foot{color:var(--dsw-alias-label-tertiary,#8b949e);font-size:12px;border-top:1px solid var(--dsw-alias-border-l1,#e5e7eb);padding-top:8px}
+.dab-card-summary{display:flex;align-items:center;gap:6px;flex-wrap:wrap;font-size:12px;color:var(--dsw-alias-label-secondary,#57606a)}
+.dab-card-summary-tag{flex:0 0 auto;padding:0 6px;border-radius:999px;background:rgba(31,111,235,.12);color:#1f6feb;font-size:10px}
+.dab-card-summary-hint{color:var(--dsw-alias-label-tertiary,#8b949e)}
 `
 
     // ---------------------------------------------------------------- 插件
@@ -555,15 +683,52 @@ window.__ModuleLoader__.load({
           AccountPoolSection,
         ),
       )
+
+      // 设置 → 模型页的两处：卡片行内摘要 + 页脚。两处都**不是**必需的，
+      // 任一席位被别人占了、或这一版宿主没声明它，都只警告不抛——
+      // 为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
+      ctx.slots.inject(PROVIDER_CARD_SLOT, () => {
+        try {
+          return ctx.slots.register({ name: PROVIDER_CARD_SLOT, key: '', order: 30 }, ProviderCardSummary)
+        } catch (error) {
+          console.warn('[dsh-account-bridge] provider 卡片摘要没挂上：', error)
+          return undefined
+        }
+      })
+
+      ctx.slots.inject(MODELS_FOOTER_SLOT, () => {
+        try {
+          return ctx.slots.register({ name: MODELS_FOOTER_SLOT, id: 'account-bridge', order: 40, label: '账号池' }, ModelsFooter)
+        } catch (error) {
+          console.warn('[dsh-account-bridge] 模型页页脚没挂上：', error)
+          return undefined
+        }
+      })
     }
 
     module.exports = {
       apply,
       inject,
       AccountPoolSection,
+      ProviderCardSummary,
+      ModelsFooter,
       // 纯函数对测试开放。这里不做摇树优化，多这几个属性对体积没有意义，
       // 但「剩余 0%」与「查不到」必须能被单独钉住——它们在面板上是两句话。
-      __internal: { call, percentText, untilText, bestRemaining, loginStatusText, sourceText, API, SETTINGS_SLOT },
+      __internal: {
+        call,
+        percentText,
+        untilText,
+        bestRemaining,
+        familySummary,
+        loginStatusText,
+        sourceText,
+        summaryStore,
+        API,
+        SETTINGS_SLOT,
+        PROVIDER_CARD_SLOT,
+        MODELS_FOOTER_SLOT,
+        SUMMARY_FRESH_MS,
+      },
     }
     return module.exports
   },

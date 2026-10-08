@@ -235,8 +235,12 @@ test('apply waits for the slot declaration and registers with an id', () => {
 
   module.apply(ctx)
 
-  assert.deepEqual(injections, ['settings.section'], 'must go through slots.inject, not register directly')
-  assert.equal(registrations.length, 1)
+  assert.deepEqual(
+    injections,
+    ['settings.section', 'settings.models.provider-card', 'settings.models.footer'],
+    'must go through slots.inject, not register directly',
+  )
+  assert.equal(registrations.length, 3)
   assert.deepEqual(registrations[0].definition, {
     name: 'settings.section',
     id: 'account-bridge',
@@ -244,6 +248,24 @@ test('apply waits for the slot declaration and registers with an id', () => {
     label: '账号池',
   })
   assert.equal(registrations[0].Component, module.AccountPoolSection)
+
+  // 卡片摘要：keyed 席位，key 是**空字符串**——我们的 provider 都没在可配置目录里
+  // 声明过，joinProviderDirectory 给它们填的 settingsNs 就是 ""。
+  assert.deepEqual(registrations[1].definition, {
+    name: 'settings.models.provider-card',
+    key: '',
+    order: 30,
+  })
+  assert.equal(registrations[1].Component, module.ProviderCardSummary)
+
+  // 页脚：list 席位，要 id。
+  assert.deepEqual(registrations[2].definition, {
+    name: 'settings.models.footer',
+    id: 'account-bridge',
+    order: 40,
+    label: '账号池',
+  })
+  assert.equal(registrations[2].Component, module.ModelsFooter)
 
   // 样式进了 head，而且卸载时会被摘掉。
   assert.equal(effects.length, 1)
@@ -585,4 +607,143 @@ test('bestRemaining picks the tightest window, and ignores rows with no reading'
   assert.equal(bestRemaining([{}]), undefined)
   assert.equal(bestRemaining([{ quota: [{ remainingFraction: 0.8 }] }, { quota: [{ remainingFraction: 0.2 }] }]), 0.2)
   assert.equal(bestRemaining([{ quota: [{ remainingFraction: 0.8 }] }, { quota: [{ name: 'no reading' }] }]), 0.8)
+})
+
+// ------------------------------------------------ 设置 → 模型页上的两处摘要
+
+/**
+ * 把任意组件挂成一棵新树并等首屏数据落地。
+ *
+ * `pick` 收的是**同一个模块实例**里的组件：`clientModule()` 每次调用都会新建一份
+ * 闭包，组件函数会把 hook 记在**它自己那个 React** 的注册表里，所以拿 A 实例的
+ * 组件往 B 实例的渲染器里画，会得到 `hook called outside a component (path root)`。
+ */
+async function mountComponent(pick, props, handlers, options) {
+  const calls = installBackend(handlers, options)
+  const mini = createMiniReact()
+  renderers.push(mini)
+  const module = clientModule(mini)
+  const Component = pick(module)
+  const element = () => mini.React.createElement(Component, props ?? {})
+  mini.render(element())
+  await settle()
+  return { mini, module, calls, tree: mini.render(element()), rerender: () => mini.render(element()) }
+}
+
+/** 摘要行本身（`.dab-card-summary` 那个 div），找不到就是没渲染。 */
+function summaryRows(tree) {
+  return hostsOf(tree, 'div').filter((node) => String(node.props.className ?? '').includes('dab-card-summary'))
+}
+
+test('familySummary writes "unknown" and "0%" as two different sentences', () => {
+  const module = bareModule()
+  const { familySummary } = module.__internal
+
+  assert.match(familySummary({ accounts: [], loginMethods: [{ id: 'pat', label: '粘贴 PAT' }] }), /还没有账号 · 可用登录：粘贴 PAT/)
+  assert.match(familySummary({ accounts: [] }), /^还没有账号$/)
+
+  const withQuota = familySummary({
+    accounts: [
+      { id: 'codex-1', quota: [{ id: 'weekly', name: '周', remainingFraction: 0 }] },
+      { id: 'codex-2', quota: [{ id: 'weekly', name: '周', remainingFraction: 0.4 }] },
+    ],
+  })
+  // 0% 是真实读数：它必须出现在句子里，而不是被当成「没有读数」吞掉。
+  assert.match(withQuota, /2 个账号/)
+  assert.match(withQuota, /最佳剩余 0%/)
+
+  const noReading = familySummary({ accounts: [{ id: 'codex-1', quota: [] }] })
+  assert.match(noReading, /额度未知/)
+  assert.ok(!/0%/.test(noReading), '"查不到" 不能写成 "0%"')
+
+  const mixed = familySummary({
+    accounts: [
+      { id: 'codex-1', disabled: true, quota: [{ id: 'weekly', remainingFraction: 0.9 }] },
+      { id: 'codex-2', cooldownUntil: Date.now() + 60_000, quota: [{ id: 'weekly', remainingFraction: 0.5 }] },
+    ],
+  })
+  assert.match(mixed, /2 个账号 · 1 个已停用 · 1 个冷却中 · 最佳剩余 50%/, '停用的账号不该把「最佳剩余」拉上去')
+})
+
+test('the provider-card summary renders only on our own provider cards', async () => {
+  const options = { families: familyWithAccounts([{ id: 'codex-1', label: 'a@b.c', quota: [{ id: 'weekly', name: '周', remainingFraction: 0.31 }] }]) }
+
+  const ours = await mountComponent((m) => m.ProviderCardSummary, { provider: { provider: 'acct-codex' } }, {}, options)
+  assert.match(textOf(ours.tree), /账号池/)
+  assert.match(textOf(ours.tree), /1 个账号 · 最佳剩余 31%/)
+
+  const theirs = await mountComponent((m) => m.ProviderCardSummary, { provider: { provider: 'deepseek-official' } }, {}, options)
+  assert.deepEqual(summaryRows(theirs.tree), [], '别人的卡片上什么都不该画')
+
+  const nameless = await mountComponent((m) => m.ProviderCardSummary, {}, {}, options)
+  assert.deepEqual(summaryRows(nameless.tree), [], '拿不到 provider id 时不该猜')
+})
+
+test('three cards on one page share a single state request', async () => {
+  // 模型页可能有十几张卡片。每张各打一次 HTTP 就是十几次请求，
+  // 而且会在用户没做任何事的时候反复碰账号。共享快照就是为这个存在的。
+  const mini = createMiniReact()
+  renderers.push(mini)
+  const calls = installBackend({}, { families: familyWithAccounts([{ id: 'codex-1', label: 'a@b.c' }]) })
+  const module = clientModule(mini)
+
+  const tree = () =>
+    mini.render(
+      mini.React.createElement(
+        'div',
+        null,
+        mini.React.createElement(module.ProviderCardSummary, { key: 1, provider: { provider: 'acct-codex' } }),
+        mini.React.createElement(module.ProviderCardSummary, { key: 2, provider: { provider: 'acct-codex' } }),
+        mini.React.createElement(module.ProviderCardSummary, { key: 3, provider: { provider: 'other' } }),
+      ),
+    )
+
+  tree()
+  await settle()
+  assert.equal(calls.filter((call) => call.action === 'state').length, 1, 'three cards, one request')
+
+  // 再画一遍（依赖没变、快照还在保鲜期内）也不该再打一次。
+  tree()
+  await settle()
+  assert.equal(calls.filter((call) => call.action === 'state').length, 1)
+
+  // 快照过期之后才允许再取一次。
+  module.__internal.summaryStore.at = Date.now() - module.__internal.SUMMARY_FRESH_MS - 1
+  module.__internal.summaryStore.load()
+  await settle()
+  assert.equal(calls.filter((call) => call.action === 'state').length, 2)
+})
+
+test('the models footer tells the truth about an empty pool, a full pool and a broken data plane', async () => {
+  const module = bareModule()
+
+  const empty = await mountComponent((m) => m.ModelsFooter, {}, {}, { families: [] })
+  assert.match(textOf(empty.tree), /还没有账号/)
+  assert.match(textOf(empty.tree), /\/pool/)
+
+  const full = await mountComponent((m) => m.ModelsFooter, {}, {}, {
+    families: [
+      ...familyWithAccounts([{ id: 'codex-1', label: 'a@b.c', cooldownUntil: Date.now() + 60_000 }]),
+      { family: 'agy', displayName: 'Antigravity', route: 'acct-agy', accounts: [{ id: 'agy-1', label: 'x' }] },
+    ],
+  })
+  assert.match(textOf(full.tree), /2 族 · 2 个账号 · 1 个冷却中/)
+
+  const broken = await mountComponent((m) => m.ModelsFooter, {}, {
+    // 信封本身是坏的：数据面挂了的时候页脚要说话，而不是画成「一个账号都没有」。
+    state: () => ({ __raw: { nope: true }, status: 500 }),
+  })
+  assert.match(textOf(broken.tree), /账号池读取失败/)
+  assert.ok(!/还没有账号/.test(textOf(broken.tree)), '读不到和「没有账号」是两件事')
+})
+
+test('the footer renders nothing at all while the first read is still in flight', async () => {
+  const mini = createMiniReact()
+  renderers.push(mini)
+  installBackend({ state: () => new Promise(() => {}) })
+  const module = clientModule(mini)
+  const element = () => mini.React.createElement(module.ModelsFooter, {})
+  mini.render(element())
+  // 刻意不 settle：这一刻是「已挂载、还没数据」。
+  assert.deepEqual(summaryRows(mini.render(element())), [], '没数据就不该画一行空话')
 })

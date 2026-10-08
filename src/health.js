@@ -122,6 +122,32 @@ export class CooldownTable {
     this.generation += 1
   }
 
+  /**
+   * 手动解冻：清掉一个账号名下**所有**冷却——账号级的、以及每个模型分线的。
+   *
+   * `clear()` 需要一个确切的模型名，而人是记不住「上次是哪个模型把号烧了」的，
+   * 所以 `/pool unfreeze` 需要一个按账号粒度的入口。传 `accountId` 为 undefined
+   * 时清整族。
+   *
+   * 只删前缀匹配的键，不做别的：冷却表是纯内存的派生状态，删掉最坏的结果是
+   * 下一次请求再撞一次同样的失败、再记一条冷却，不会让谁多花钱。
+   */
+  clearAccount(family, accountId) {
+    // 键的形状是 `${family}/${accountId}/${model}`，账号级那条是 `${family}/${accountId}/*`。
+    // 所以一个账号的前缀就是 `${family}/${accountId}/`——**不是** `${accountKey(...)}/`，
+    // 后者会变成 `.../*/`，一个键都匹配不上（这个错法不会报错，只会静默地什么都不删）。
+    const prefix = accountId === undefined ? `${family}/` : `${family}/${accountId}/`
+    let removed = 0
+    for (const key of [...this.#entries.keys()]) {
+      if (key.startsWith(prefix)) {
+        this.#entries.delete(key)
+        removed += 1
+      }
+    }
+    if (removed > 0) this.generation += 1
+    return removed
+  }
+
   /** 为什么这个成员现在不可用（供 UI / 日志解释）。 */
   why(family, accountId, model, now = Date.now()) {
     const member = this.#entries.get(memberKey(family, accountId, model))

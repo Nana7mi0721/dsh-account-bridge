@@ -60,7 +60,9 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
 | 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文） |
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
-| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ✅ 真机验证（路由真机可用 + 23 个面板用例） |
+| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ✅ 真机验证（路由真机可用 + 28 个面板用例） |
+| **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
+| **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ✅ 单测（席位形状、按 route 过滤、多卡共享一次请求）；**真的在浏览器里看见**待人工确认 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 用量徽章（`SubscriptionUsageBadge` 那种常驻角标） | ⛔ 未做（额度只在面板里按需查） |
 | **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 8 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
@@ -98,6 +100,43 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
   但那不是这条路由引入的风险——那个进程本来就能直接读你的 `~/.codex/auth.json`。
   给它加 token 只会得到一种错觉：让人以为「这个面是有防护的」。
   所以这里的选择是把边界写清楚，而不是加一层看起来像防护的东西。
+
+## `/pool` 命令族（不开浏览器也能看池子）
+
+```
+/pool                        看每族的账号与健康（**不发任何网络请求**）
+/pool check [族]             真去查一次额度（**会打上游**）
+/pool unfreeze [族] [账号]   清掉冷却，让号立刻重新参与调度（`thaw` 同义）
+```
+
+三条设计约束：
+
+1. **`/pool` 不发网络请求。** 它只读凭据记录与内存里的冷却表。想在对话里顺手看一眼池子
+   是常事，而每一次自动查额度都是拿你的账号去碰上游的风控。
+2. **`/pool check` 会把「这一族没有额度接口」和「有接口但这次没读出来」分开写。**
+   两者都是「未知」，但含义不同：前者你永远等不到读数，后者值得再试一次。
+3. **解冻那条命令会解释它为什么安全。** 冷却表是纯内存的派生状态，清掉最坏结果是
+   下次再撞一次同样的失败、再记一条。不说清楚，人不敢用，账号就一直冻着——那才是真损失。
+
+`/pool unfreeze codex-1` 会被认出来（`codex-1` 看起来是账号 id，不是族），并直接告诉你正确写法
+是 `/pool unfreeze codex codex-1`。
+
+命令面走宿主自己的 `ctx.commands.register()`，**不产生模型消息、不进模型历史**，所以问一句不烧额度。
+
+## 设置 → 模型页上的两处摘要
+
+模型页会给每张 provider 卡片留一个扩展位，插件在那里挂一行池子状态；页面底部还有一行整池汇总。
+这两处都是**可选**的：席位被别人占了、或这一版宿主没声明它，都只警告不抛——
+为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
+
+**卡片摘要怎么落到我们的 provider 上**：那是 keyed 席位，key 是该 provider 的 `settingsNs`。
+我们的 11 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
+`joinProviderDirectory()` 给这类 provider 填的 `settingsNs` 就是**空字符串**，
+所以用 `key: ''` 注册一条就能落到所有这些卡片上——组件内部再按 route 过滤，
+别人的卡片一律返回 `null`。
+
+**摘要不自己轮询**：模型页一打开可能有十几张卡片，每张各打一次 HTTP 就是十几次请求。
+这里用模块级共享快照，一次取数、所有卡片订阅，30 秒内不重复取。
 
 `ctx.remote` 那条路走不通：它是**构建期**生成的（typert + remote 双注册，路由谱系由构建工具产出），
 第三方插件没有构建期，加不了路由。自己挂 `ctx.webServer.register({kind:'prefix', path, handler})`
@@ -297,7 +336,8 @@ export ELECTRON_RUN_AS_NODE=1
 src/
   index.js            插件入口：apply / name / inject
   api.js              回环 HTTP 数据面（面板用的 POST /account-bridge/<action>）
-  client.js           设置页「账号池」面板（手写客户端模块，无构建步骤）
+  client.js           设置页「账号池」面板 + 模型页行内摘要/页脚（手写客户端模块，无构建步骤）
+  commands.js         `/pool` 命令族（只读状态 / 真查额度 / 解冻冷却）
   pool.js             账号池适配器（实现 dsh-llm 的适配器契约）
   health.js           失败归类 → 冷却建议 → 冷却表
   store.js            账号记录（落在 ctx.credentials）
@@ -338,6 +378,7 @@ src/
 test/
   mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
   responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
+  commands.test.js    `/pool` 命令族（含一个照抄宿主校验规则的假 `commands` 服务）
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
 docs/
   family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
@@ -383,7 +424,7 @@ node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**663 个用例，651 通过，0 失败，12 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**700 个用例，688 通过，0 失败，12 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash

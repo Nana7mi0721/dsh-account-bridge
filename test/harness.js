@@ -78,6 +78,32 @@ export function createMockHost(config) {
         return () => services.tools.definitions.delete(definition.name)
       },
     },
+    // 与 `dsh-commands` 的 `normalizeDefinition` 对齐：名字要过 COMMAND_NAME 正则、
+    // description 非空、给了 `input` 就必须有非空 `hint`、同 scope 重名会抛。
+    // 校验写在假实现里而不是只靠真机，是为了让「命令定义写错了」在单测里就炸。
+    commands: {
+      definitions: new Map(),
+      register(definition) {
+        if (!/^[a-z][a-z0-9_-]*$/.test(definition.name)) {
+          throw new TypeError(`command name "${definition.name}" must be lowercase`)
+        }
+        if (typeof definition.description !== 'string' || definition.description.trim() === '') {
+          throw new TypeError(`command "${definition.name}" description must not be empty`)
+        }
+        if (definition.input !== undefined
+          && (typeof definition.input?.hint !== 'string' || definition.input.hint.trim() === '')) {
+          throw new TypeError(`command "${definition.name}" input hint must be a non-empty string`)
+        }
+        if (typeof definition.handler !== 'function') {
+          throw new TypeError(`command "${definition.name}" handler must be a function`)
+        }
+        if (services.commands.definitions.has(definition.name)) {
+          throw new Error(`commands: "${definition.name}" is already registered in this scope`)
+        }
+        services.commands.definitions.set(definition.name, definition)
+        return () => services.commands.definitions.delete(definition.name)
+      },
+    },
     // 与 `dsh-host-webserver` 的契约对齐：`register({kind,path,handler})`，
     // **重复 path 会抛**（宿主侧就是这么写的），返回 disposer。
     webServer: {

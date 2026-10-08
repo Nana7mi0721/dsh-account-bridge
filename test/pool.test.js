@@ -291,3 +291,68 @@ test('disposing the plugin releases the registered routes', async () => {
   host.dispose()
   assert.equal(host.services.llm.routes.size, 0)
 })
+
+test('clearAccount removes the account key and every per-model member key under it', async () => {
+  // 这条用例的由来：`/pool unfreeze` 需要一个**按账号**的入口（人记不住
+  // 「上次是哪个模型把这个号烧了」），而 `clear()` 需要一个确切的模型名。
+  // 实现时踩过一次：前缀写成 `${accountKey(...)}/`（也就是 `.../*/`）会一条都匹配不上，
+  // 而且**不报错**——命令会安安静静地什么都不做。所以这里逐条断言键真的没了。
+  const health = new CooldownTable()
+  const verdict = { action: 'switch', cooldownMs: 60_000, reason: 'RATE_LIMIT', scope: 'member' }
+  health.record('codex', 'codex-1', 'gpt-5-codex', verdict)
+  health.record('codex', 'codex-1', 'gpt-5', verdict)
+  health.record('codex', 'codex-2', 'gpt-5-codex', verdict)
+  health.record('claude', 'claude-1', 'sonnet', verdict)
+
+  const frozen = health.snapshot()
+  assert.equal(frozen.filter((entry) => entry.blocked).length, 4)
+
+  const removed = health.clearAccount('codex', 'codex-1')
+  assert.equal(removed, 2, '账号级那条 + 两个模型分线里属于 codex-1 的两条')
+  assert.equal(health.available('codex', 'codex-1', 'gpt-5-codex'), true)
+  assert.equal(health.available('codex', 'codex-1', 'gpt-5'), true)
+  // 别的账号、别的族不受影响。
+  assert.equal(health.available('codex', 'codex-2', 'gpt-5-codex'), false)
+  assert.equal(health.available('claude', 'claude-1', 'sonnet'), false)
+})
+
+test('clearAccount with no account id clears one family, not every family', async () => {
+  const health = new CooldownTable()
+  const verdict = { action: 'switch', cooldownMs: 60_000, reason: 'QUOTA', scope: 'account' }
+  health.record('codex', 'codex-1', 'gpt-5', verdict)
+  health.record('claude', 'claude-1', 'sonnet', verdict)
+
+  assert.equal(health.clearAccount('codex'), 1)
+  assert.equal(health.available('codex', 'codex-1', 'gpt-5'), true)
+  assert.equal(health.available('claude', 'claude-1', 'sonnet'), false)
+  // 清空一个本来就没东西的族 ⇒ 0，而且不该白白把 generation 推高（那会让池缓存无谓失效）。
+  const before = health.generation
+  assert.equal(health.clearAccount('codex'), 0)
+  assert.equal(health.generation, before)
+})
+
+test('adapter.unfreeze reports how many cooldowns it cleared and drops the caches', async () => {
+  const family = makeFamily()
+  const { adapter, health } = await makeAdapter(family, ['codex-1'])
+
+  // 直接往健康表里放两条：一条**账号级**（`healthOf` 看的就是它），
+  // 一条**模型分线**（只有 `clearAccount` 的前缀匹配才会碰到）。
+  health.record('codex', 'codex-1', 'gpt-5', { action: 'switch', cooldownMs: 60_000, reason: 'QUOTA', scope: 'account' })
+  health.record('codex', 'codex-1', 'gpt-5-codex', { action: 'switch', cooldownMs: 60_000, reason: 'RATE_LIMIT', scope: 'member' })
+  assert.match(String(adapter.healthOf('codex', 'codex-1')), /后可用/)
+
+  const removed = adapter.unfreeze('codex', 'codex-1')
+  assert.ok(removed >= 1, `expected at least one cooldown to be cleared, got ${removed}`)
+  assert.equal(adapter.healthOf('codex', 'codex-1'), undefined, '解冻后不该再报告冷却')
+
+  // 已经解冻过的账号再解冻一次 ⇒ 0，且不抛。
+  assert.equal(adapter.unfreeze('codex', 'codex-1'), 0)
+  assert.equal(health.snapshot().filter((entry) => entry.blocked).length, 0)
+})
+
+test('adapter.unfreeze on a healthy account is a no-op', async () => {
+  const family = makeFamily()
+  const { adapter } = await makeAdapter(family, ['codex-1'])
+  assert.equal(adapter.unfreeze('codex', 'codex-1'), 0)
+  assert.equal(adapter.healthOf('codex', 'codex-1'), undefined)
+})
