@@ -9,6 +9,9 @@
     ".": {
       "default": "./src/index.js"
     },
+    "./client": {
+      "default": "./src/client.js"
+    },
     "./package.json": "./package.json"
   },
   "files": [
@@ -29,6 +32,9 @@
   "dsh": {
     "bundle": {
       "patch": "./cordis.patch.yml"
+    },
+    "client": {
+      "platform": "web"
     },
     "compatibility": {
       "runtime": ">=0.2.0-rc.1 <0.3.0-0",

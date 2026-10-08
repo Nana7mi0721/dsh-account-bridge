@@ -473,6 +473,7 @@ export const minimaxFamily = {
       `${LLM_BASE[region]}/messages`,
       { method: 'POST', headers: headers(auth), body: JSON.stringify(body), signal },
       payload.proxy,
+      true,
     )
     if (!response.ok) {
       const text = await response.text().catch(() => '')

@@ -17,7 +17,6 @@
 
 import { createHash } from 'node:crypto'
 import { access } from 'node:fs/promises'
-import { homedir } from 'node:os'
 import { join } from 'node:path'
 
 /** 单族发现的超时。agy 族要起子进程跑 `agy models`，所以给得比 HTTP 探测宽。 */
@@ -28,32 +27,13 @@ const DEFAULT_FAMILY_TIMEOUT_MS = 15_000
  *
  * 这张表的作用不是导入，而是**诚实**：扫到了就告诉用户「这里有东西，但这一族还没写」。
  * 加族时应该把对应条目从这里删掉——族自己的 `discover()` 会接管。
+ *
+ * **当前是空的**：workbuddy / qoder / commandcode 三个占位都在各自族落地后删掉了
+ * （它们现在由族自己的 `discover()` 报，报得比这里细）。留着这个机制是给下一批族用的——
+ * 第三档还有 codebuddy / cline / opencode / kiro / devin / factory / zhipu / qwen / mimo /
+ * sensenova / longcat 没写，那时候这张表会重新有内容。
  */
-const UNSHIPPED_SITES = [
-  {
-    family: 'workbuddy',
-    displayName: 'WorkBuddy（腾讯 CodeBuddy）',
-    note: '凭据 5.6 起是 AES-256-GCM 密文，解密需要跑它自带的 Electron',
-    candidates: () => [
-      process.env.LOCALAPPDATA && join(process.env.LOCALAPPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth', 'workbuddy-desktop.info'),
-      process.env.APPDATA && join(process.env.APPDATA, 'CodeBuddyExtension', 'Data', 'Public', 'auth', 'workbuddy-desktop.info'),
-      join(homedir(), '.config', 'CodeBuddyExtension', 'Data', 'Public', 'auth', 'workbuddy-desktop.info'),
-      join(homedir(), '.local', 'share', 'CodeBuddyExtension', 'Data', 'Public', 'auth', 'workbuddy-desktop.info'),
-    ],
-  },
-  {
-    family: 'qoder',
-    displayName: 'Qoder',
-    note: '本机只留 machine_id，真正的凭据要靠用户粘 PAT',
-    candidates: () => [join(homedir(), '.qoder', '.auth', 'machine_id')],
-  },
-  {
-    family: 'commandcode',
-    displayName: 'CommandCode',
-    note: 'auth.json 由官方 CLI 维护，只读',
-    candidates: () => [join(homedir(), '.commandcode', 'auth.json')],
-  },
-]
+const UNSHIPPED_SITES = []
 
 /**
  * 从一条记录里取出「稳定身份」参与哈希的字段。

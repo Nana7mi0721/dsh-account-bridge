@@ -21,6 +21,7 @@ import { CooldownTable } from './health.js'
 import { LoginBroker } from './login/broker.js'
 import { AccountBridgeAdapter } from './pool.js'
 import { AccountStore } from './store.js'
+import { registerAccountBridgeRoutes } from './api.js'
 import { assertUniqueRoutes, selectFamilies } from './families/registry.js'
 import { createToolDefinitions } from './tools.js'
 import { discoverLocalAccounts } from './discover.js'
@@ -101,6 +102,13 @@ export function apply(ctx, config) {
     log,
   })
 
+  /**
+   * 登录中介。要等 `authorization` 服务就绪才存在，而 HTTP 面的挂载只看 `webServer`，
+   * 两个服务谁先到不确定——所以用一个闭包变量在两者之间搭桥，而不是让 api.js
+   * 去猜哪个 ctx 里有什么。
+   */
+  let activeBroker
+
   ctx.effect(() => () => {
     fetcher.close?.().catch(() => {})
   })
@@ -122,6 +130,7 @@ export function apply(ctx, config) {
   // 2) 登录：每族一个 flow。key 就是登录槽位的凭据键，seam 会往那里写。
   ctx.inject(['authorization'], (authCtx) => {
     const broker = new LoginBroker({ authorization: authCtx.authorization, store, log })
+    activeBroker = broker
     for (const family of families) {
       const methods = family.login?.methods ?? []
       if (methods.length === 0) continue
@@ -153,6 +162,30 @@ export function apply(ctx, config) {
         }
       }
     })
+  })
+
+  // 3.5) 网页设置页的数据面。客户端插件跑在浏览器里，拿不到宿主对象，
+  //      只能经 HTTP 说话；官方的 `ctx.remote` 是构建期固定的，第三方加不了。
+  //      所以这里自己挂一条回环专用的 JSON 路由，见 src/api.js 的说明。
+  ctx.inject(['webServer'], (webCtx) => {
+    try {
+      const dispose = registerAccountBridgeRoutes({
+        webServer: webCtx.webServer,
+        adapter,
+        store,
+        families,
+        ctx: familyContext,
+        log,
+        // broker 在 authorization 服务就绪后才存在；路由层每次动作现取，
+        // 避免「webServer 先于 authorization 注册」时拿到一个 undefined。
+        get broker() {
+          return activeBroker
+        },
+      })
+      webCtx.effect(() => dispose)
+    } catch (error) {
+      log.warn?.('account-bridge: mounting the HTTP API failed: %s', String(error?.message ?? error))
+    }
   })
 
   log.info?.('account-bridge: ready (families: %s)', families.map((family) => family.id).join(', ') || 'none')

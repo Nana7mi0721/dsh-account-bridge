@@ -57,9 +57,52 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
 | 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
 | 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
+| 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
+| 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文） |
+| 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
+| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ✅ 真机验证（路由真机可用 + 23 个面板用例） |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
-| 客户端设置界面（`settings.section` / 用量徽章） | ⛔ 未做 |
+| 用量徽章（`SubscriptionUsageBadge` 那种常驻角标） | ⛔ 未做（额度只在面板里按需查） |
 | **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 8 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
+
+## 设置页里的「账号池」面板
+
+打开 DSH 的 设置 → 左侧导航最后一项「账号池」。它能做九件事：看每个族的账号与状态、
+按族的登录方法起登录、从本机一键导入、停用/启用某个账号、续期令牌、给某个账号单独设代理、
+删号、逐账号查额度、扫一遍本机有哪些客户端登录态可导入。
+
+### 三条刻意的设计
+
+1. **只有「有登录在跑」时才自动刷新。** 登录是跨进程、跨分钟的状态，必须自动跟；
+   其余一律等你点按钮。这个面板每次「检查额度」都会真的打上游——做成自动轮询，
+   等于拿你的账号去刷上游的风控。
+2. **「额度未知」和「额度 0%」是两个句子。** 查不到就渲染一个灰的「额度 未知」，
+   **连进度条都不画**。画一条 0% 宽的条会被读成「读数就是 0」——「查不到」和
+   「用光了」对你要做的事来说是完全相反的两件事。
+3. **凭据一个字节都不出宿主。** 数据面 `publicAccount()` 是**白名单式重建**：
+   只放 id / 标签 / 来源 / 是否停用 / 是否可续 / 过期时间 / 代理 / 状态 / 冷却 / 额度。
+   `auth.access`、`auth.refresh`、`auth.apiKey` 一律不外传；将来 `auth` 里加了新字段，
+   默认也是不外传（白名单的好处就是**漏掉是安全的**，黑名单则是漏掉就泄密）。
+
+### 这个面板背后的 HTTP 面，以及它为什么不设 token
+
+浏览器里拿不到宿主对象，所以面板走一条插件自己挂的回环路由：
+`POST /account-bridge/<action>`，信封是 `{ok:true, value}` 或 `{ok:false, error:{code,message}}`。
+
+**它没有任何 token，理由是：不需要，而且加了会更糟。**
+
+- 它**只服务回环**：`req.socket.remoteAddress` 只认 `127.0.0.1` / `::1` / `::ffff:127.0.0.1`，
+  其余一律 403。这一面能起登录、能删账号，所以这条检查是硬性的。
+- 它**不返回任何凭据**（见上面前两条），所以拿到响应也换不走账号。
+- 真正的问题是「同机上的另一个本地进程能不能调它」。能不能？**能。**
+  但那不是这条路由引入的风险——那个进程本来就能直接读你的 `~/.codex/auth.json`。
+  给它加 token 只会得到一种错觉：让人以为「这个面是有防护的」。
+  所以这里的选择是把边界写清楚，而不是加一层看起来像防护的东西。
+
+`ctx.remote` 那条路走不通：它是**构建期**生成的（typert + remote 双注册，路由谱系由构建工具产出），
+第三方插件没有构建期，加不了路由。自己挂 `ctx.webServer.register({kind:'prefix', path, handler})`
+是唯一可行的姿势——注意**重复 path 会抛**，所以要用 `ctx.inject(['webServer'], …)` 配 `webCtx.effect(() => dispose)`，
+插件卸载时把路由摘干净。
 
 ## Antigravity 族（`agy`）：四个实话
 
@@ -253,6 +296,8 @@ export ELECTRON_RUN_AS_NODE=1
 ```
 src/
   index.js            插件入口：apply / name / inject
+  api.js              回环 HTTP 数据面（面板用的 POST /account-bridge/<action>）
+  client.js           设置页「账号池」面板（手写客户端模块，无构建步骤）
   pool.js             账号池适配器（实现 dsh-llm 的适配器契约）
   health.js           失败归类 → 冷却建议 → 冷却表
   store.js            账号记录（落在 ctx.credentials）
@@ -270,14 +315,19 @@ src/
     anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude / MiniMax Code / 通用族）
     chat-completions.js  DSH 消息 ↔ OpenAI Chat Completions API（通用族）
     agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
+    qoder.js          Qoder 私有信封 + COSY 签名 + WAF body 编码（纯函数）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
     claude.js         Claude 族
     agy.js            Antigravity 族（驱动本机 agy CLI）
     minimax.js        MiniMax Code 族（直连 mcode 网关 + 令牌写回桌面端）
+    qoder.js          Qoder 族（PAT → jobToken，私有信封 + COSY 签名）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
+test/
+  mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
+  fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
 ```
 
 ## 四条真机/源码才暴露的契约（已钉成回归测试）
@@ -316,12 +366,23 @@ node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**137 个用例，136 通过，1 跳过**（跳过的那例是下面这个真机 agy 推理，每回合要烧 27k tokens，
-不该在每次 `npm test` 时都跑）：
+当前：**402 个用例，396 通过，0 失败，6 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
 BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
 ```
+
+需要联网、默认跳过的真机用例各有各的环境变量开关：
+`BRIDGE_LIVE_AGY` / `BRIDGE_LIVE_QODER`（Qoder 那条本机也跑不了，没有 PAT）。
+
+**面板（`src/client.js`）怎么在没有浏览器的情况下测**：仓库里带了一个 60 行的迷你 React
+（`test/mini-react.js`），够撑起 `createElement` / `useState` / `useEffect` / `useCallback` / `useRef`。
+不把真 React 拉成 devDependency 的理由是：那会让 `npm test` 依赖一份**与宿主版本无关**的 React，
+测出来的东西和真实运行环境的关系就说不清了。迷你 React 踩过两个坑，都值得记：
+`useCallback` 依赖没变时**必须返回上一次那个函数**（返回新函数会让 `useEffect(fn, [cb])`
+变成「取数 → setState → 依赖又变 → 再取数」的死循环）；每个用例必须**一棵全新的组件树**
+（共用一棵树会让 hook 状态跨用例泄漏，测出来的绿是假的）。
 
 MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的，跑一次就消耗掉一条真实登录态。
 写回路径的验证方式是**拿真的 `auth.json`、只把令牌端点换成 stub**

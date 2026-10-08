@@ -292,6 +292,7 @@ export const codexFamily = {
         signal,
       },
       payload.proxy,
+      true,
     )
     if (!response.ok) {
       const text = await response.text().catch(() => '')

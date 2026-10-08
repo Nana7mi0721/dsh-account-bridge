@@ -2,3 +2,10 @@ node_modules/
 *.log
 .DS_Store
 *.local.json
+
+# 测试夹具里可能出现的**私钥**。哪怕是一次性的丢弃密钥也不进版本库：
+# 这个仓库的主题就是凭据处理，一个 `BEGIN PRIVATE KEY` 块躺在源码树里，
+# 既会被各种 secret scanner 拦下来，也是在给读者做坏示范。
+# 需要私钥的用例（COSY 的 RSA-PKCS1v1.5 往返）在测试运行时现生成密钥对。
+*.pem
+*.key

@@ -1,0 +1,21 @@
+{
+  "_comment": "由 test/fixtures/refresh-qoder-vector.mjs 生成。COSY 签名为逆向所得（上游无官方文档）。注意：cosyKey 是 RSA-PKCS1v1.5 密文，带随机填充、不可复现——定标方式是\"用 qoder-cosy-test-key.pem 解密回 aesKey\"，不是逐字节比对。这里用的是本文件自带的丢弃测试密钥对，与上游公钥无关。",
+  "aesKey": "0123456789abcdef",
+  "timestamp": "1700000000",
+  "machineId": "fixture-machine-id",
+  "requestId": "11111111-2222-4333-8444-555555555555",
+  "requestIdHeader": "11111111-2222-4333-8444-555555555555",
+  "requestUrl": "https://api3.qoder.sh/algo/api/v2/model/list?Encode=1",
+  "sigPath": "/api/v2/model/list",
+  "body": "{\"hello\":\"world\"}",
+  "bodyHash": "fbc24bcc7a1794758fc1327fcfebdaf6",
+  "bodyLength": "17",
+  "authorization": "Bearer COSY.eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJpbmZvIjoibUp4aDNBcFROMWk0dkJBZjZreXYrWFB3WG1xaGRMenpPb2lnOURGUkd1bTFkVk94RWlmSXBnYllpZFV0MmNpZjkwK2ZoTktVelFCK2s0NDNyRFRMWGV5MEMyc2VpdlhIVlRQK3B4WlNNNlNwT040alB3WUJuK0lydWI3bXBOaFdrQk9URzhaUGZmYjB1aTRpTjhNa0ZhcHpsUGcxVlJIVFZvbERtODgrYzNFPSIsImNvc3lWZXJzaW9uIjoiMS4xLjQ3IiwiaWRlVmVyc2lvbiI6IiJ9.bf31b27ed54ea0ff2a5f6640419b4b23",
+  "cosyKey": "NVu7rElF1jegWf2PvwKy0EkT7b5rpBv8P3OjmXEWMmmANhrotIzQZuSYqlXm9DSLva2LH2eKMvoe4/GH6wxgEC3CbeKHHDyiJm3GJGiE3eGbat78zBcde/NZCXUA1R8Mdo6r1tMrg9K+f1Ea7T1DPQQG8vuWhfJw+Uw0SyMTU5g=",
+  "payloadB64": "eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJpbmZvIjoibUp4aDNBcFROMWk0dkJBZjZreXYrWFB3WG1xaGRMenpPb2lnOURGUkd1bTFkVk94RWlmSXBnYllpZFV0MmNpZjkwK2ZoTktVelFCK2s0NDNyRFRMWGV5MEMyc2VpdlhIVlRQK3B4WlNNNlNwT040alB3WUJuK0lydWI3bXBOaFdrQk9URzhaUGZmYjB1aTRpTjhNa0ZhcHpsUGcxVlJIVFZvbERtODgrYzNFPSIsImNvc3lWZXJzaW9uIjoiMS4xLjQ3IiwiaWRlVmVyc2lvbiI6IiJ9",
+  "infoB64": "mJxh3ApTN1i4vBAf6kyv+XPwXmqhdLzzOoig9DFRGum1dVOxEifIpgbYidUt2cif90+fhNKUzQB+k443rDTLXey0C2seivXHVTP+pxZSM6SpON4jPwYBn+Irub7mpNhWkBOTG8ZPffb0ui4iN8MkFapzlPg1VRHTVolDm88+c3E=",
+  "userInfoJson": "{\"uid\":\"u_fixture\",\"security_oauth_token\":\"job-token-fixture\",\"name\":\"Fixture User\",\"aid\":\"\",\"email\":\"fixture@example.com\"}",
+  "sigInput": "eyJ2ZXJzaW9uIjoidjEiLCJyZXF1ZXN0SWQiOiIxMTExMTExMS0yMjIyLTQzMzMtODQ0NC01NTU1NTU1NTU1NTUiLCJpbmZvIjoibUp4aDNBcFROMWk0dkJBZjZreXYrWFB3WG1xaGRMenpPb2lnOURGUkd1bTFkVk94RWlmSXBnYllpZFV0MmNpZjkwK2ZoTktVelFCK2s0NDNyRFRMWGV5MEMyc2VpdlhIVlRQK3B4WlNNNlNwT040alB3WUJuK0lydWI3bXBOaFdrQk9URzhaUGZmYjB1aTRpTjhNa0ZhcHpsUGcxVlJIVFZvbERtODgrYzNFPSIsImNvc3lWZXJzaW9uIjoiMS4xLjQ3IiwiaWRlVmVyc2lvbiI6IiJ9\nNVu7rElF1jegWf2PvwKy0EkT7b5rpBv8P3OjmXEWMmmANhrotIzQZuSYqlXm9DSLva2LH2eKMvoe4/GH6wxgEC3CbeKHHDyiJm3GJGiE3eGbat78zBcde/NZCXUA1R8Mdo6r1tMrg9K+f1Ea7T1DPQQG8vuWhfJw+Uw0SyMTU5g=\n1700000000\n{\"hello\":\"world\"}\n/api/v2/model/list",
+  "expectedSig": "bf31b27ed54ea0ff2a5f6640419b4b23",
+  "testPublicKeyPem": "-----BEGIN PUBLIC KEY-----\nMIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDANaMfT0avBXsGfnIHuzLjcMcP\nMw12Ys5r30xNe4A+eFago/pcmd6RC1WRvq0Hs20KnlARJJfcI4a/NP/1rMKY8o5v\nBa5FsSTF7eVSpjchUKD4cGNWlqIboyzsJONFfwchMj3Ni1XQdACVh4TgddQPlW7z\nuOoemzbwqVH0F4m4ywIDAQAB\n-----END PUBLIC KEY-----\n"
+}

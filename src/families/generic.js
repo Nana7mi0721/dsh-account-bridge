@@ -464,6 +464,7 @@ export const genericFamily = {
       endpointOf(auth, compat.chatPath),
       { method: 'POST', headers: headersOf(auth, compat, { json: true, stream: true }), body: JSON.stringify(body), signal },
       proxy,
+      true,
     )
     if (!response.ok) throw httpError(response, await response.text().catch(() => ''), 'generic')
     yield* translateChatStream(response, { signal })

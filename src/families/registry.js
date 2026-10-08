@@ -6,11 +6,26 @@
 import { agyFamily } from './agy.js'
 import { claudeFamily } from './claude.js'
 import { codexFamily } from './codex.js'
+import { commandcodeFamily } from './commandcode.js'
 import { genericFamily } from './generic.js'
 import { minimaxFamily } from './minimax.js'
+import { qoderFamily } from './qoder.js'
+import { workbuddyFamily } from './workbuddy.js'
 
-/** 全部族，顺序即 UI 展示顺序。 */
-export const FAMILIES = [codexFamily, claudeFamily, agyFamily, minimaxFamily, genericFamily]
+/**
+ * 全部族，顺序即 UI 展示顺序：第一档三族 → 第二档 → 通用兜底族放最后
+ * （它是「以上都不适用时」的出口，排在前面会喧宾夺主）。
+ */
+export const FAMILIES = [
+  codexFamily,
+  claudeFamily,
+  agyFamily,
+  minimaxFamily,
+  qoderFamily,
+  workbuddyFamily,
+  commandcodeFamily,
+  genericFamily,
+]
 
 /** 全部族的 id。 */
 export function familyIds() {

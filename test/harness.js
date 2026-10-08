@@ -78,6 +78,18 @@ export function createMockHost(config) {
         return () => services.tools.definitions.delete(definition.name)
       },
     },
+    // 与 `dsh-host-webserver` 的契约对齐：`register({kind,path,handler})`，
+    // **重复 path 会抛**（宿主侧就是这么写的），返回 disposer。
+    webServer: {
+      routes: new Map(),
+      register(route) {
+        if (services.webServer.routes.has(route.path)) {
+          throw new Error(`webserver: duplicate ${route.kind} route "${route.path}"`)
+        }
+        services.webServer.routes.set(route.path, route)
+        return () => services.webServer.routes.delete(route.path)
+      },
+    },
   }
 
   const disposers = []
