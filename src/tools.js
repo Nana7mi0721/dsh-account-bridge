@@ -8,6 +8,7 @@
  */
 
 import { discoverLocalAccounts, importDiscovered } from './discover.js'
+import { labelFor, normaliseBaseUrl } from './families/generic.js'
 
 /** 把毫秒差说成人话。 */
 function humanize(ms) {
@@ -254,7 +255,84 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
     },
   })
 
+  definitions.push({
+    name: 'account_bridge_add_endpoint',
+    description:
+      'Add a `generic` account: any OpenAI- or Anthropic-compatible endpoint (self-hosted vLLM, an intranet gateway, a relay) ' +
+      'identified by baseURL plus either an API key or the name of an environment variable holding it. ' +
+      'Use this instead of account_bridge_login when you already know the values — it skips the interactive prompts. ' +
+      'Add several accounts for the same baseURL with different keys to get pooling and failover.',
+    parameters: compileParameters({
+      baseUrl: { type: 'string', required: true, description: 'Endpoint root including the version prefix, e.g. "https://api.example.com/v1". A missing scheme becomes https, and a localhost host becomes http.' },
+      apiKey: { type: 'string', description: 'API key. Stored in the credential record. Omit when the endpoint needs none or when you pass apiKeyEnv.' },
+      apiKeyEnv: { type: 'string', description: 'Name of an environment variable holding the key, e.g. "MY_RELAY_KEY". Only the name is stored; the secret never enters the credential record.' },
+      label: { type: 'string', description: 'Display name. Defaults to the preset name or the host.' },
+      models: { type: 'string', description: 'Comma-separated model ids to declare, for endpoints whose /models is missing or wrong. Each may be "id" or "id:contextWindow".' },
+      protocol: { type: 'string', description: 'Wire dialect: "openai" (Chat Completions, the default) or "anthropic" (Messages).' },
+      importKey: { type: 'string', description: 'Set to "1" to also copy the key into the environment under apiKeyEnv, so the record holds only the variable name.' },
+    }),
+    output: textOutput(),
+    async execute(args) {
+      const family = families.find((item) => item.id === 'generic')
+      if (!family) return '这个版本的插件里没有 generic 族。'
+      try {
+        const auth = { baseUrl: normaliseBaseUrl(args.baseUrl) }
+        if (auth.baseUrl.length === 0) return 'baseUrl 是空的。'
+        new URL(auth.baseUrl)
+        if (args.apiKey) auth.apiKey = String(args.apiKey).trim()
+        if (args.apiKeyEnv) auth.apiKeyEnv = String(args.apiKeyEnv).trim()
+        if (args.protocol === 'anthropic') auth.compat = { protocol: 'anthropic' }
+        const models = parseModelList(args.models)
+        if (models.length > 0) auth.models = models
+
+        const note = applyEnvImport(auth, args)
+        const id = await store.nextAccountId('generic')
+        const record = family.recordFromAuth(auth, args.label ?? labelFor(auth), 'manual', auth.apiKeyEnv !== undefined)
+        await store.write(id, record)
+        adapter.invalidate('generic')
+        const lines = [`已添加账号 \`${id}\`｜${record.label}｜${auth.baseUrl}`]
+        if (note) lines.push(note)
+        lines.push('', '用 account_bridge_accounts 确认它列出的模型；模型没出现多半是端点没有 /models，把 models 参数补上即可。')
+        return lines.join('\n')
+      } catch (error) {
+        return `添加失败：${String(error?.message ?? error)}`
+      }
+    },
+  })
+
   return definitions
 }
 
-export { compileParameters, humanize }
+/**
+ * `models` 参数 → 声明式目录。
+ *
+ * 收两种写法：`id` 与 `id:contextWindow`。上下文窗口要能填是因为**上游不会告诉你**，
+ * 而它直接决定 DSH 什么时候开始压缩历史——填错代价很大，填不了代价也很大。
+ */
+function parseModelList(raw) {
+  if (typeof raw !== 'string' || raw.trim().length === 0) return []
+  const out = []
+  for (const chunk of raw.split(',')) {
+    const text = chunk.trim()
+    if (text.length === 0) continue
+    const separator = text.lastIndexOf(':')
+    const id = separator > 0 ? text.slice(0, separator).trim() : text
+    const window = separator > 0 ? Number(text.slice(separator + 1).trim()) : Number.NaN
+    if (id.length === 0) continue
+    out.push(Number.isFinite(window) && window > 0 ? { id, contextWindow: window } : id)
+  }
+  return out
+}
+
+/** `importKey=1`：把密钥挪进环境变量，记录里只留变量名。 */
+function applyEnvImport(auth, args) {
+  if (String(args.importKey ?? '') !== '1' || !auth.apiKey) return undefined
+  const name = auth.apiKeyEnv ?? `ACCOUNT_BRIDGE_${String(args.label ?? new URL(auth.baseUrl).host).toUpperCase().replace(/[^A-Z0-9]+/g, '_')}_KEY`
+  process.env[name] = auth.apiKey
+  auth.apiKeyEnv = name
+  delete auth.apiKey
+  return `注意：密钥已写入当前进程的环境变量 ${name}（**只在这个进程活着的时候有效**）。`
+    + '要让它在重启后仍然存在，请把它写进 shell 配置或 DSH 的环境，然后重新添加一次这个账号。'
+}
+
+export { compileParameters, humanize, parseModelList, applyEnvImport }

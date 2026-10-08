@@ -57,22 +57,35 @@ function toolResultText(block) {
   return block === undefined ? '' : JSON.stringify(block)
 }
 
-/** 顶层 `system` 数组：身份块 + 显式 system 提示 + 对话开头的 system 消息。 */
-export function toAnthropicSystem(system, messages = []) {
-  const blocks = [{ type: 'text', text: CLAUDE_CODE_IDENTITY }]
+/**
+ * 顶层 `system` 数组：身份块 + 显式 system 提示 + 对话开头的 system 消息。
+ *
+ * `identity` 可覆盖身份块。`claude` / `minimax` 族走的是**官方**端点，声明身份是必须的；
+ * 而 `generic` 族连的是任意兼容端点，往那儿塞一句「我是 Claude Code」就是撒谎，
+ * 所以它传空串把这一块去掉。
+ */
+export function toAnthropicSystem(system, messages = [], { identity = CLAUDE_CODE_IDENTITY } = {}) {
+  const blocks = []
+  if (typeof identity === 'string' && identity.length > 0) blocks.push({ type: 'text', text: identity })
   if (typeof system === 'string' && system.length > 0) blocks.push({ type: 'text', text: system })
   for (const message of messages.slice(0, conversationStart(messages))) {
     for (const block of message.content ?? []) {
       if (block?.type === 'text') blocks.push({ type: 'text', text: block.text })
     }
   }
+  if (blocks.length === 0) return blocks
   // tools 渲染在 system 之前，所以这一个标记同时缓存两者。
   blocks[blocks.length - 1].cache_control = { type: 'ephemeral' }
   return blocks
 }
 
-/** DSH 消息 → Anthropic `messages`。 */
-export function toAnthropicMessages(messages) {
+/**
+ * DSH 消息 → Anthropic `messages`。
+ *
+ * `cache` 控制要不要打 prompt-cache 断点。官方端点认 `cache_control`，但任意兼容端点
+ * 未必认（有的会对未知字段直接 400），所以 `generic` 族传 false。
+ */
+export function toAnthropicMessages(messages, { cache = true } = {}) {
   const out = []
   const start = conversationStart(messages)
   for (const [index, message] of messages.entries()) {
@@ -150,7 +163,7 @@ export function toAnthropicMessages(messages) {
     if (last?.role === role) last.content.push(...blocks)
     else out.push({ role, content: blocks })
   }
-  markMessageCache(out)
+  if (cache) markMessageCache(out)
   return out
 }
 
@@ -227,7 +240,11 @@ export async function* translateAnthropicStream(response, { signal } = {}) {
     } catch {
       continue
     }
-    const kind = event.event ?? payload.type
+    // `readSse` 在没有 `event:` 行时会填 SSE 的默认事件名 `message`，而 Anthropic 的
+    // 事件名里没有叫 `message` 的——所以那是「上游没发事件名」，不是真有个事件叫它。
+    // 少了这一步，`?? payload.type` 是永远走不到的死代码：自建中转常常只发 `data:`，
+    // 而它们照样在 payload 里写 `type`。
+    const kind = event.event === 'message' || event.event === undefined ? payload.type : event.event
     if (kind === 'ping') continue
     if (kind === 'error' || payload.type === 'error') {
       const error = new Error(`anthropic: ${payload.error?.message ?? payload.message ?? 'stream error'}`)

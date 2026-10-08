@@ -172,3 +172,26 @@ test('a stream with no content block at all is EMPTY_RESPONSE, not a silent succ
     (error) => error.code === 'EMPTY_RESPONSE',
   )
 })
+
+test('a relay that sends bare data lines, with no event name, still translates', async () => {
+  // `readSse` 在缺少 `event:` 行时填 SSE 的默认事件名 `message`，而 Anthropic 的事件名里
+  // 没有叫 `message` 的。自建中转常常只发 `data:`、把事件名写在 payload.type 里——
+  // 这一条钉住那个回退真的走得到（它曾经被 `event.event ?? payload.type` 变成死代码）。
+  // 这里自己造响应而不用上面那个 sseResponse：它**总是**会写出一行 `event:`，
+  // 所以表达不了「没有事件名」这件事。
+  const events = [
+    { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } },
+    { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } },
+    { type: 'content_block_stop', index: 0 },
+    { type: 'message_delta', delta: { stop_reason: 'end_turn' } },
+  ]
+  const response = {
+    ok: true,
+    body: (async function* generate() {
+      for (const event of events) yield `data: ${JSON.stringify(event)}\n\n`
+    })(),
+  }
+  const chunks = await collect(translateAnthropicStream(response))
+  assert.equal(chunks.find((chunk) => chunk.type === 'block-end')?.block.text, 'hi')
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+})

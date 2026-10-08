@@ -44,7 +44,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 模型目录进 GUI 选择器（账号池 = 所有账号目录的并集） | ✅ 真机验证（无账号时为空目录，不报错） |
 | 目录未知时**不宣称任何 reasoning effort**（不承诺兑现不了的东西） | ✅ 真机验证 |
 | 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude,agy}-login`） | ✅ 真机验证 |
-| 四个工具：`account_bridge_discover` / `account_bridge_accounts` / `account_bridge_login` / `account_bridge_accounts_remove` | ✅ 真机验证 |
+| 把通用兜底族注册成 provider route（`acct-generic`，显示名 `通用 API（自建 / 中转）`） | ✅ 真机验证 |
 | **本机账号统一发现**：一次扫完所有族的凭据位点，如实分四类（可导入 / 已导入 / 有凭据但导不进来 / 这族还没写） | ✅ 真机验证 |
 | **一键导入**：`account_bridge_discover({import:true})` 把扫到的登录态收进账号池，无需任何粘贴或登录 | ✅ 真机验证（导入后 `acct-agy` 立刻列出 14 个模型） |
 | 启动时后台扫一遍本机登录态并打日志（可用 `discoverOnStartup:false` 关掉） | ✅ 真机验证 |
@@ -59,7 +59,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 客户端设置界面（`settings.section` / 用量徽章） | ⛔ 未做 |
-| 其余族（WorkBuddy / Qoder / zcode / 通用兜底 `generic`） | ⛔ 未做（架构已就位，见 `src/families/`） |
+| **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 8 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
 
 ## Antigravity 族（`agy`）：四个实话
 
@@ -134,6 +134,57 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
 仍然存在的**固有竞态**，说清楚：如果桌面端在我们这一来一回之间也刷了一次，双方必有一方的令牌
 作废。CAS 只保证「不互相覆盖」，保证不了「两边的请求不会同时飞出去」。真撞上时的表现是插件这边
 拿到 `invalid_grant` → AUTH → 账号进 24h 冷却，而桌面端是好的；重新导入一次即可。
+
+## 通用兜底族（`generic`）：五个实话
+
+1. **它其实不是「账号级反代」。** 别的族复用的是一个**登录态**（订阅额度、OAuth 会话）；
+   这一族收的是一个**端点和一把密钥**。放在这里是因为「本机自建 / 内网中转」经常和反代被
+   一起问，而宿主内置的 `llm-pi-ai` 已经把 OpenRouter / DeepSeek / Moonshot 这些主流云厂商
+   的 key 接完了——**要接那些，宿主自带的更好用**，别绕这一族。这一族补的是宿主没有预设的格子：
+   局域网里的 vLLM / SGLang、one-api / new-api / LiteLLM 这类中转网关、公司内网网关，
+   以及 `/models` 返回不规范的野路子端点。
+2. **没有 `discover`。** 它没有本机凭据位点可扫，所以「一键导入本机登录态」这条路对它不存在，
+   只能手填或用 `account_bridge_add_endpoint` 工具加。别的族扫得到它扫不到，这是如实反映。
+3. **没有 `refresh`。** API key 不会过期。所以这一族永远不会有「刷新失败」产生的冷却，
+   也不会有任何写回本机的行为。
+4. **没有 `quota`。** OpenAI 的接口语义里没有标准化的额度端点，Anthropic 也没有。
+   与其声明式地编一个进度条，不如什么都不报——**报一个假的剩余额度比不报更糟**。
+5. **它对上游的方言做了让步，每一处都是被真机逼出来的**（见下面的验收一节）。
+
+### 验收方式：拿一个插件写代码时不知道其存在的端点
+
+用真服务测证明不了「**任意**兼容端点都能接」——那只说明代码碰巧对上了那个服务。
+所以验收用的是 `_dsh_research/mock-openai.mjs`：一个跑在 `127.0.0.1` 临时端口上的假端点，
+模型名是编的，而且**刻意在方言上刁难**——
+
+- Anthropic 那条路**只发 `data:` 行、不发 `event:` 行**（自建中转很常见的样子）；
+- **不认 `stream_options`**：发了就 400；
+- **不认 `cache_control`**：发了就 400（钉住「不冒充 Claude Code、不塞上游没要的字段」）；
+- **必须带对的 `Bearer` / `x-api-key`**，否则 401。
+
+真机结果（隔离 profile，`acct-generic`）：
+
+```
+llm.listModels(acct-generic) = [mock-alpha, mock-beta, declared-only]
+LIVE generic OpenAI 方言 (mock-alpha) chunk count = 8 | text = "PONG"
+LIVE generic Anthropic 方言 + 声明式目录 (declared-only) chunk count = 8 | text = "PONG"
+```
+
+`mock-image-only`（只出图的模型）**没有**进选择器，这是有意的；`declared-only` 只存在于
+手填的声明式目录里，上游 `/models` 从不返回它，它照样能推理。
+
+### 顺手修掉的一个会静默泄密的 bug
+
+`normaliseBaseUrl`（用户只填 `api.example.com` 时自动补协议）原来用前缀判断私有网段：
+
+```js
+/^(localhost|127\.0\.0\.1|\[::1\]|0\.0\.0\.0|10\.|192\.168\.|172\.(1[6-9]|2\d|3[01])\.)/i
+```
+
+于是 `10.example.com` 被判定成内网、补成 `http://`——**一个把 API Key 明文发出去的静默降级**。
+现在四个点分十进制字节写全，且后面必须紧跟 `(\/|$)`：只有**确实是**本机/内网 IP 的才补 `http`，
+其余一律 `https`。取舍写在注释里：公网走 http 会在密钥离开本机之前就被中间人拿走，
+而猜错的代价只是「请求失败」——后者用户一眼就能看出来。
 
 ## 本机账号统一发现（P2.5）
 
@@ -216,7 +267,8 @@ src/
   wire/
     sse.js            SSE 解析
     responses.js      DSH 消息 ↔ OpenAI Responses API（Codex）
-    anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude / MiniMax Code）
+    anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude / MiniMax Code / 通用族）
+    chat-completions.js  DSH 消息 ↔ OpenAI Chat Completions API（通用族）
     agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
   families/
@@ -224,10 +276,11 @@ src/
     claude.js         Claude 族
     agy.js            Antigravity 族（驱动本机 agy CLI）
     minimax.js        MiniMax Code 族（直连 mcode 网关 + 令牌写回桌面端）
+    generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 ```
 
-## 三条真机/源码才暴露的契约（已钉成回归测试）
+## 四条真机/源码才暴露的契约（已钉成回归测试）
 
 1. **适配器是鸭子类型，但少一个方法就当场注册失败。**
    `registerAdapter` 在注册时**无条件**调用 `adapter.providerRetryPolicy(provider)`；
@@ -248,6 +301,13 @@ src/
    「这轮是工具调用」就不会续跑，拿不到 `'max-tokens'` 就不会做截断处理。
    → 见 `test/anthropic.test.js` 的六种 `stop_reason` 断言。
 
+4. **`readSse` 在没有 `event:` 行时会填 SSE 的默认事件名 `'message'`，而不是 `undefined`。**
+   于是 `translateAnthropicStream` 里 `event.event ?? payload.type` 里的 `??` 是**永远走不到的死代码**
+   ——Anthropic 的事件名里没有叫 `message` 的，`event.event` 恒为真。而自建中转只发 `data:`
+   是常态（把事件名写在 `payload.type` 里）。现在按 `'message' | undefined` 显式回退。
+   → 见 `test/anthropic.test.js` 里那例「自己造响应、不用 `sseResponse`」的用例：
+   那个辅助函数**总是**会写出一行 `event:`，表达不了「没有事件名」这件事。
+
 ## 测试
 
 ```bash
@@ -256,7 +316,7 @@ node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**95 个用例，94 通过，1 跳过**（跳过的那例是下面这个真机 agy 推理，每回合要烧 27k tokens，
+当前：**137 个用例，136 通过，1 跳过**（跳过的那例是下面这个真机 agy 推理，每回合要烧 27k tokens，
 不该在每次 `npm test` 时都跑）：
 
 ```bash
