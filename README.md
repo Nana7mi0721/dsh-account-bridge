@@ -316,6 +316,11 @@ src/
     chat-completions.js  DSH 消息 ↔ OpenAI Chat Completions API（通用族）
     agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
     qoder.js          Qoder 私有信封 + COSY 签名 + WAF body 编码（纯函数）
+    workbuddy.js      WorkBuddy 私有层（信包、身份模仿头、额度三态）
+    commandcode.js    CommandCode 三传输协商（cli / provider-chat / provider-messages）
+    grok.js           Grok Responses 线（两个计费口径的端点评址 + 指纹头）
+    copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
+    trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
@@ -323,12 +328,24 @@ src/
     agy.js            Antigravity 族（驱动本机 agy CLI）
     minimax.js        MiniMax Code 族（直连 mcode 网关 + 令牌写回桌面端）
     qoder.js          Qoder 族（PAT → jobToken，私有信封 + COSY 签名）
+    workbuddy.js      WorkBuddy 族（只读借用桌面端凭据）
+    commandcode.js    CommandCode 族（四源凭据回退 + 三传输）
+    grok.js           Grok 族（默认走订阅口径的 cli-chat-proxy）
+    copilot.js        Copilot 族（设备码；非公开接口，随时可能失效）
+    trae.js           Trae 族（私有协议；凭据只读，不写回）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
   mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
+  responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
+docs/
+  family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
 ```
+
+> `docs/family-contract.md` 是本仓最该先读的一份文档：族的对象形状、`stream` 的 chunk 契约、
+> 失败归类表、凭据记录与写回 CAS、登录与发现的入口、测试与真机验收清单、提交前自检，都在里面。
+> 本仓所有族的写法都按它来，新增族也应当如此。
 
 ## 四条真机/源码才暴露的契约（已钉成回归测试）
 
@@ -366,7 +383,7 @@ node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**402 个用例，396 通过，0 失败，6 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**663 个用例，651 通过，0 失败，12 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
@@ -374,7 +391,9 @@ BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
 ```
 
 需要联网、默认跳过的真机用例各有各的环境变量开关：
-`BRIDGE_LIVE_AGY` / `BRIDGE_LIVE_QODER`（Qoder 那条本机也跑不了，没有 PAT）。
+`BRIDGE_LIVE_AGY` / `BRIDGE_LIVE_QODER` / `BRIDGE_LIVE_WORKBUDDY` / `BRIDGE_LIVE_COMMANDCODE` /
+`BRIDGE_LIVE_GROK` / `BRIDGE_LIVE_COPILOT` / `BRIDGE_LIVE_TRAE`
+（其中 Qoder / CommandCode / Grok / Copilot / Trae 那几条**本机也跑不了**——没有 PAT、没有账号、没有订阅）。
 
 **面板（`src/client.js`）怎么在没有浏览器的情况下测**：仓库里带了一个 60 行的迷你 React
 （`test/mini-react.js`），够撑起 `createElement` / `useState` / `useEffect` / `useCallback` / `useRef`。
@@ -408,7 +427,57 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   不写回就等于把用户踢下线（见上面那一节）。加新族时**默认按只读处理**，
   只有确实证明了「不写回会破坏对方」才开写回，并且必须带 CAS 基准。
 
+## 族的状态与取舍
+
+| 族 | route | 状态 |
+|---|---|---|
+| `codex` | `acct-codex` | ✅ 真机验证 |
+| `claude` | `acct-claude` | ✅ 路由真机验证；**真实推理待有订阅账号后验** |
+| `agy` | `acct-agy` | ✅ 真机验证（驱动本机 `agy` CLI，14 个模型，真机推理通过） |
+| `minimax` | `acct-minimax` | ✅ 真机推理通过 |
+| `generic` | `acct-generic` | ✅ 真机验证（对着一个假端点两条方言各跑通一次） |
+| `qoder` | `acct-qoder` | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
+| `workbuddy` | `acct-workbuddy` | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文，解不开） |
+| `commandcode` | `acct-commandcode` | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
+| `grok` | `acct-grok` | ⚠️ 单测通过，**真机未验**（本机没装 Grok CLI，也没有订阅） |
+| `copilot` | `acct-copilot` | ⚠️ 单测通过，**真机零验证**（本机没有 Copilot 订阅） |
+| `trae` | `acct-trae` | ⚠️ 单测通过，**真机零验证**（本机没有任何 Trae 账号） |
+
+**明确不做的族，以及为什么**：
+
+- **`kimi`（Kimi Code 订阅）**——宿主内置的 `@earendil-works/pi-ai` 已经带了 `kimi-coding` OAuth
+  provider（`dist/auth/oauth/kimi-coding.js`，`https://auth.kimi.com` → `https://api.kimi.com/coding`），
+  本插件再写一份只是把同一件事做第二遍。**不做。**
+- **`cursor`**——计划书 §4.1 判据 C4 明确排除：Cursor 员工已公开认定这类接入违反其 ToS §1.5。
+- **`zcode`**——按用户决定砍掉。
+
+**关于 `grok` 与 `copilot` 的一句实话**：宿主内置也已经有 `xai` 与 `github-copilot` 两个 OAuth provider
+（`dist/auth/oauth/xai.js` 用的 client_id 就是 `b1a00492-073a-47ea-816f-4c329264a828`）。
+这两个族的价值**不是**「补一个宿主没有的格子」，而是把同一份登录态**纳入统一账号池**：
+多账号、冷却、按账号出口代理、额度面板、与其它族一致的失败分类。
+**只要单账号够用，就直接用宿主内置那个，不必装本插件。**
+
+**`copilot` 族还有两句必须一起说**：
+
+- 它打的 `/copilot_internal/v2/token` 是 GitHub **自己声明为 non-public、unstable** 的接口，
+  没有任何兼容性承诺，**随时可能整体失效**（族里 `risk: 'high'` 就是这个原因）。
+  V1ki 的实现里也有一句同样的注释。
+- 它**没有额度接口**——所以面板上这一族永远显示「额度 未知」，
+  这不是没做，是上游根本没有可读的额度。按 §C3，读不到就报未知，**绝不编 0%**。
+
+**`trae` 族砍掉了三样东西**（都是明面取舍，不是偷偷跳过）：
+
+- **不做凭据写回**。Trae 的 `storage.json` 是密文，而公开的参考实现里**只有解密方向**，
+  没有加密方向的任何实现或抓包。自己拼一个加密器去覆盖用户的 Trae IDE 登录态文件，
+  写坏了就是用户被登出、而我们连写坏了都发现不了；何况 Trae IDE 自己也在拿同一个
+  refresh token 刷。所以这一族 `externallyOwned: true`（诚实标记源头在客户端里），
+  但刷新结果**只写我们自己的凭据记录**。代价是用久了要重新导入一次。
+- **不做签到**。它是这一族唯一会**改变账号状态**的动作，而 `9074` 是账号级稳定拒绝
+  （换 deviceId / UA / token 都无效）。只保留纯查询的 `quota()`。
+- **不声明推理档位、图片、工具能力**——没有证据就不声明（契约 §5.3）。
+
 ## 未定事项
 
 - LICENSE：尚未添加（社区 DSH 插件惯例是 MIT，但加之前需要作者确认——不加就等于保留所有权利）。
-- 首发族补齐顺序、第二档（zcode / minimax）、通用兜底族 `generic`：见计划书。
+- 第三档族（codebuddy / cline / opencode / kiro / devin / factory / zhipu / qwen / mimo / sensenova / longcat）：
+  在 `src/discover.js` 的 `UNSHIPPED_SITES` 机制里留着位置，尚未实现。详见计划书 §4.2。

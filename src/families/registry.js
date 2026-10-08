@@ -7,7 +7,10 @@ import { agyFamily } from './agy.js'
 import { claudeFamily } from './claude.js'
 import { codexFamily } from './codex.js'
 import { commandcodeFamily } from './commandcode.js'
+import { copilotFamily } from './copilot.js'
+import { traeFamily } from './trae.js'
 import { genericFamily } from './generic.js'
+import { grokFamily } from './grok.js'
 import { minimaxFamily } from './minimax.js'
 import { qoderFamily } from './qoder.js'
 import { workbuddyFamily } from './workbuddy.js'
@@ -24,6 +27,9 @@ export const FAMILIES = [
   qoderFamily,
   workbuddyFamily,
   commandcodeFamily,
+  grokFamily,
+  copilotFamily,
+  traeFamily,
   genericFamily,
 ]
 

@@ -153,6 +153,17 @@ export async function* translateResponsesStream(response, options = {}) {
   const open = new Map()
   /** 已经发过 block-start 的 output_index（有些上游不发 output_item.added）。 */
   const started = new Set()
+  /**
+   * `item.id` → 块下标。
+   *
+   * 存在的理由是一个真事故：**收尾事件不一定带顶层 `output_index`**。
+   * 只认顶层字段时，`response.output_item.done` 会落到 `?? 0` 那个兜底上，
+   * 于是它把**第 0 个块**关掉、而不是真正该关的那个 ⇒ 界面上同一段文本出现两遍、
+   * 外加一个空的 `block-end`。上游在 `.done` 里总是带 `item.id`，所以按 id 反查。
+   */
+  const indexByItemId = new Map()
+  /** 这一轮有没有产出工具调用块——决定收尾是 `'tool-calls'` 还是 `'stop'`。 */
+  let sawToolCall = false
   const begin = function* (index, blockType, seed = {}) {
     if (started.has(index)) return
     started.add(index)
@@ -177,11 +188,12 @@ export async function* translateResponsesStream(response, options = {}) {
         const index = payload.output_index ?? open.size
         const item = payload.item ?? {}
         const blockType = item.type === 'function_call' ? 'tool-call' : item.type === 'reasoning' ? 'reasoning' : 'text'
+        if (typeof item.id === 'string') indexByItemId.set(item.id, index)
         yield* begin(index, blockType, { callId: item.call_id ?? item.id, name: item.name })
         break
       }
       case 'response.output_text.delta': {
-        const index = payload.output_index ?? 0
+        const index = payload.output_index ?? indexByItemId.get(payload.item_id) ?? 0
         yield* begin(index, 'text')
         sawOutput = true
         yield { type: 'text-delta', index, text: payload.delta ?? '' }
@@ -189,17 +201,19 @@ export async function* translateResponsesStream(response, options = {}) {
       }
       case 'response.reasoning_summary_text.delta':
       case 'response.reasoning_text.delta': {
-        const index = payload.output_index ?? 0
+        const index = payload.output_index ?? indexByItemId.get(payload.item_id) ?? 0
         yield* begin(index, 'reasoning')
         sawOutput = true
         yield { type: 'reasoning-delta', index, text: payload.delta ?? '' }
         break
       }
       case 'response.function_call_arguments.delta': {
-        const index = payload.output_index ?? 0
+        const index = payload.output_index ?? indexByItemId.get(payload.item_id) ?? 0
+        if (typeof payload.item_id === 'string') indexByItemId.set(payload.item_id, index)
         yield* begin(index, 'tool-call', { callId: payload.item_id })
         const entry = open.get(index)
         sawOutput = true
+        sawToolCall = true
         yield {
           type: 'tool-call-delta',
           index,
@@ -209,16 +223,19 @@ export async function* translateResponsesStream(response, options = {}) {
         break
       }
       case 'response.output_item.done': {
-        const index = payload.output_index ?? 0
         const item = payload.item ?? {}
+        // 顺序要紧：顶层 → 按 item.id 反查 → 最后才是 0。
+        const index = payload.output_index ?? indexByItemId.get(item.id) ?? 0
         const entry = open.get(index) ?? {}
         const block = blockFromItem(item, entry)
         if (block) {
           sawOutput = true
+          if (block.type === 'tool-call') sawToolCall = true
           yield* begin(index, block.type === 'tool-call' ? 'tool-call' : block.type === 'reasoning' ? 'reasoning' : 'text')
           yield { type: 'block-end', index, block }
         }
         open.delete(index)
+        if (typeof item.id === 'string') indexByItemId.delete(item.id)
         break
       }
       case 'response.completed': {
@@ -259,7 +276,10 @@ export async function* translateResponsesStream(response, options = {}) {
     throw error
   }
   // DSH 只认 'stop' | 'tool-calls' | 'max-tokens'（见 wire/anthropic.js 的同名注释）。
-  yield { type: 'finish', reason: { kind: finishReason === 'max-tokens' ? 'max-tokens' : 'stop' } }
+  // 这一轮产出过工具调用就必须报 'tool-calls'：报成 'stop' 会让宿主以为模型把话说完了，
+  // 而实际上它在等工具结果——这一条以前是错的（永远回 'stop'），有回归用例钉住。
+  const kind = finishReason === 'max-tokens' ? 'max-tokens' : sawToolCall ? 'tool-calls' : 'stop'
+  yield { type: 'finish', reason: { kind } }
 }
 
 /** 把 Responses 的输出项翻成 DSH 的完整块。 */
