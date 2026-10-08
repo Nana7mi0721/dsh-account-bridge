@@ -3,8 +3,9 @@
 把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
 统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
 
-> 状态：**P2**（骨架 + Codex 族 + Claude 族 + Antigravity 族；三条 route 已在真实 DSH 宿主里验证可见：
-> provider / 模型目录 / 登录流 / 工具面；Antigravity 族已跑通真实推理）。
+> 状态：**P2.5**（骨架 + Codex 族 + Claude 族 + Antigravity 族 + 本机账号统一发现）。
+> 三条 route 已在真实 DSH 宿主里验证可见（provider / 模型目录 / 登录流 / 工具面）；
+> Antigravity 族已跑通真实推理；本机发现 → 一键导入 → 模型出现在选择器，这条链路已在真机上走通。
 > 尚未跑过 Codex/Claude 的真实登录，也还没有客户端 UI。
 
 ## 它和「key 级接入」的区别
@@ -40,8 +41,11 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 模型目录进 GUI 选择器（账号池 = 所有账号目录的并集） | ✅ 真机验证（无账号时为空目录，不报错） |
 | 目录未知时**不宣称任何 reasoning effort**（不承诺兑现不了的东西） | ✅ 真机验证 |
 | 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude,agy}-login`） | ✅ 真机验证 |
-| 三个工具：`account_bridge_accounts` / `account_bridge_login` / `account_bridge_accounts_remove` | ✅ 真机验证 |
-| 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 单测（含 API-key 模式如实报「不可导入」） |
+| 四个工具：`account_bridge_discover` / `account_bridge_accounts` / `account_bridge_login` / `account_bridge_accounts_remove` | ✅ 真机验证 |
+| **本机账号统一发现**：一次扫完所有族的凭据位点，如实分四类（可导入 / 已导入 / 有凭据但导不进来 / 这族还没写） | ✅ 真机验证 |
+| **一键导入**：`account_bridge_discover({import:true})` 把扫到的登录态收进账号池，无需任何粘贴或登录 | ✅ 真机验证（导入后 `acct-agy` 立刻列出 14 个模型） |
+| 启动时后台扫一遍本机登录态并打日志（可用 `discoverOnStartup:false` 关掉） | ✅ 真机验证 |
+| 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 单测 + 真机（含 API-key 模式如实报「不可导入」） |
 | 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 单测 + 真机（本机无该文件，如实返回空） |
 | 驱动本机 `agy` CLI 推理（NDJSON 流 → DSH chunk，含 usage 与失败归类） | ✅ 真机推理通过 |
 | 本机 agy 登录探测与导入（`agy models` 探针 + 14 个模型的真实目录解析） | ✅ 真机验证 |
@@ -75,7 +79,51 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 配置项：`agyBin`（不在 PATH 上时给绝对路径）、`agyWorkdir`（agy 的工作目录，它是个 agent，
 会往 cwd 里写东西）。
 
-## 安装（开发期）
+## 本机账号统一发现（P2.5）
+
+社区里所有账号级反代插件都只认**自己**的登录流程，没有一个会去问「这台机器上已经有哪些客户端
+登录过了」。结果是用户装了四个插件、把同一个 Google 账号登了四次。这一层补的就是这个空白位：
+
+```bash
+# 只看，不动任何东西
+account_bridge_discover
+# 收下所有能导入的
+account_bridge_discover  { import: true }
+```
+
+真机输出长这样（这台机器上 `agy` 已登录、`codex` 是 API-key 模式、装过 WorkBuddy）：
+
+```
+本机账号发现（2026-10-08T10:26:50.185Z）
+
+可以导入（1）
+- agy ｜ agy CLI（本机登录）
+
+扫到了凭据，但这一族还没写（1）
+- workbuddy ｜ C:\Users\…\workbuddy-desktop.info ｜ workbuddy 族尚未实现（计划书 P6）｜凭据 5.6 起是 AES-256-GCM 密文…
+
+有凭据但导不进来（1）
+- codex ｜ Codex CLI（API key 模式，无订阅令牌） ｜ auth.json 里没有 OAuth tokens，只有 API key
+```
+
+两条刻意的设计：
+
+- **发现不等于导入。** 扫描只读，一个字节都不写；导入是另一个显式动作。
+  启动时那次自动扫描也**只打日志**，不会替你收下任何账号。
+- **做不到的要如实说。** 本机装了我们还没实现的族的客户端时，报「探测到了凭据，但这一族还没写」
+  ——而不是假装没看见，也不是给一个导入后必然失败的条目。
+  `src/discover.js` 里的 `UNSHIPPED_SITES` 就是这张「欠账表」，加族时要把它删掉。
+
+实现上值得一提的两点：
+
+- **「已经导入过」靠指纹比对，不靠新字段。** 指纹取凭据里**不轮换**的那部分
+  （`accountId` → `refresh` → … → 文件路径 → `access` → label），所以对 P2.5 之前写下的账号
+  同样有效。顺序里把 `access` 压到很后面、把文件路径放在它前面，是因为 access token 每次刷新都变：
+  拿它当身份，同一份登录态在刷新前后会被当成两个账号，一键导入就会反复插入重复条目。
+- **一个族挂住不能拖垮整次扫描。** 每族独立超时（默认 15s）并各自 catch；
+  扫描的全部价值就在于「在用户还没指定族的时候把所有族都问一遍」，所以这里不能用 `Promise.all`。
+
+
 
 插件目录就是这个仓库根。直接把它 `link:` 进 profile，改源码即时生效：
 
@@ -102,6 +150,7 @@ src/
   http.js             per-账号 出站代理（undici ProxyAgent）
   cli-version.js      上游客户端版本号（查 npm registry，失败静默回退）
   cli-run.js          驱动上游 CLI 的子进程层（进程树 kill / 超时 / 撕裂行拼接）
+  discover.js         本机登录态统一发现与一键导入（每族独立超时 + 身份指纹）
   login/
     loopback.js       PKCE + 回环回调服务器
     broker.js         「拿到 URL」与「登录完成」解耦

@@ -156,6 +156,23 @@ export const agyFamily = {
     ]
   },
 
+  /**
+   * 见 codex 族同名方法的说明：统一发现的落盘入口。
+   *
+   * agy 这条不复制任何令牌——令牌在 agy 自己的钥匙串里，我们只记「用本机 agy 的登录态」
+   * 这件事。所以记录里 `auth` 是一个标记对象，不是凭据。
+   */
+  recordFromDiscovery(item) {
+    return {
+      family: 'agy',
+      label: item.label ?? 'agy CLI（本机登录）',
+      source: 'client-import',
+      externallyOwned: true,
+      auth: { ...CLI_AUTH },
+      createdAt: new Date().toISOString(),
+    }
+  },
+
   // ---------------------------------------------------------------- 模型目录
 
   async listModels(ctx, _payload, signal) {

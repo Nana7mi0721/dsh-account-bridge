@@ -23,6 +23,7 @@ import { AccountBridgeAdapter } from './pool.js'
 import { AccountStore } from './store.js'
 import { assertUniqueRoutes, selectFamilies } from './families/registry.js'
 import { createToolDefinitions } from './tools.js'
+import { discoverLocalAccounts } from './discover.js'
 
 /** 插件 id。`cordis.patch.yml` 里 `insert[].name` 用的是**包名**（模块说明符），不是这个。 */
 export const name = 'dsh-account-bridge'
@@ -46,6 +47,13 @@ const DEFAULTS = {
   agyBin: undefined,
   /** agy 的工作目录。agy 是个 agent，会往 cwd 里写东西；留空 = 继承进程 cwd。 */
   agyWorkdir: undefined,
+  /**
+   * 启动时在后台扫一遍本机客户端的登录态（P2.5），只打日志，不导入任何东西。
+   *
+   * 默认开。关掉它的理由很实际：`agy` 族的探测要起一个子进程跑 `agy models`，
+   * 不想让插件在启动路径上派生子进程的人可以关。
+   */
+  discoverOnStartup: true,
 }
 
 /** 取一个可能尚未就绪的服务。 */
@@ -135,7 +143,7 @@ export function apply(ctx, config) {
     // `tools.register(definition)` 只校验 `output.schema`/`output.render`，
     // 所以本地拼一个等价定义即可，见 src/tools.js 的说明。
     authCtx.inject(['tools'], (toolsCtx) => {
-      for (const definition of createToolDefinitions({ adapter, broker, store, families, log })) {
+      for (const definition of createToolDefinitions({ adapter, broker, store, families, log, ctx: familyContext })) {
         try {
           const handle = toolsCtx.tools.register(definition)
           toolsCtx.effect(() => disposeOf(handle))
@@ -148,6 +156,34 @@ export function apply(ctx, config) {
   })
 
   log.info?.('account-bridge: ready (families: %s)', families.map((family) => family.id).join(', ') || 'none')
+
+  // 4) P2.5：启动时在**后台**扫一遍本机已登录的客户端，把「能白捡几个账号」说出来。
+  //
+  // 刻意不 await：agy 族的探测要起子进程跑 `agy models`（秒级），放进 apply 的路径上会
+  // 拖慢插件加载。扫描只用于提示，不参与任何后续判断——导入永远是显式动作。
+  if (settings.discoverOnStartup !== false) {
+    void discoverLocalAccounts({ families, store, ctx: familyContext, log })
+      .then((scan) => {
+        const fresh = scan.importable.filter((entry) => !entry.alreadyImported)
+        if (fresh.length > 0) {
+          log.info?.(
+            'account-bridge: 发现 %d 个可导入的本机登录态（%s）——用 account_bridge_discover 查看或导入',
+            fresh.length,
+            fresh.map((entry) => `${entry.family}: ${entry.label ?? '未命名'}`).join('; '),
+          )
+        }
+        if (scan.unsupported.length > 0) {
+          log.info?.(
+            'account-bridge: 另外探测到 %d 处尚未实现的族的凭据（%s）',
+            scan.unsupported.length,
+            scan.unsupported.map((entry) => entry.family).join(', '),
+          )
+        }
+      })
+      .catch((error) => {
+        log.warn?.('account-bridge: 本机账号发现失败: %s', String(error?.message ?? error))
+      })
+  }
 }
 
 export { AccountBridgeAdapter, AccountStore, CooldownTable, LoginBroker }

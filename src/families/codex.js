@@ -112,6 +112,16 @@ export const codexFamily = {
     return found
   },
 
+  /**
+   * 把一条发现记录变成可落盘的账号记录。
+   *
+   * 与 `login: { method: 'import' }` 共用同一个构造器——两条入口必须产出**逐字节相同**的
+   * 记录，否则「同一份本机登录态经不同路径导入」会变成两条互相不知道对方存在的账号。
+   */
+  recordFromDiscovery(item) {
+    return recordFromAuth(item.auth, item.label, 'client-import', true)
+  },
+
   // ---------------------------------------------------------------- 登录
 
   login: {

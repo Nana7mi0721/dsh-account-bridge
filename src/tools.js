@@ -7,6 +7,8 @@
  * @module dsh-account-bridge/tools
  */
 
+import { discoverLocalAccounts, importDiscovered } from './discover.js'
+
 /** 把毫秒差说成人话。 */
 function humanize(ms) {
   if (!Number.isFinite(ms) || ms <= 0) return '可用'
@@ -14,6 +16,36 @@ function humanize(ms) {
   if (minutes < 1) return `${Math.round(ms / 1000)} 秒后可用`
   if (minutes < 90) return `${minutes} 分钟后可用`
   return `${(minutes / 60).toFixed(1)} 小时后可用`
+}
+
+/** 渲染一次本机发现的结果。 */
+function renderScan(scan, extra = []) {
+  const lines = [`本机账号发现（${scan.scannedAt}）`, '']
+  const { importable, blocked, unsupported, errors } = scan
+  const fresh = importable.filter((entry) => !entry.alreadyImported)
+  const known = importable.filter((entry) => entry.alreadyImported)
+
+  if (fresh.length === 0 && known.length === 0 && unsupported.length === 0 && blocked.length === 0 && errors.length === 0) {
+    lines.push('本机没有扫到任何已知客户端的登录态。')
+    lines.push('')
+    lines.push('这不是错误：装了对应客户端并在里面登录过之后，再跑一次这里就会列出来。')
+    return lines.concat(extra).join('\n')
+  }
+
+  const section = (title, entries, render) => {
+    if (entries.length === 0) return
+    lines.push(`${title}（${entries.length}）`)
+    for (const entry of entries) lines.push(`- ${render(entry)}`)
+    lines.push('')
+  }
+
+  section('可以导入', fresh, (entry) => `${entry.family} ｜ ${entry.label ?? '未命名'}${entry.sourcePath ? ` ｜ 来源 ${entry.sourcePath}` : ''}`)
+  section('已经导入过', known, (entry) => `${entry.family} ｜ ${entry.label ?? '未命名'}`)
+  section('扫到了凭据，但这一族还没写', unsupported, (entry) => `${entry.family} ｜ ${entry.sourcePath} ｜ ${entry.reason}`)
+  section('有凭据但导不进来', blocked, (entry) => `${entry.family} ｜ ${entry.label ?? '未命名'} ｜ ${entry.reason}`)
+  section('发现过程出错的族', errors, (entry) => `${entry.family} ｜ ${entry.message}`)
+
+  return lines.concat(extra).join('\n').trimEnd()
 }
 
 /** 渲染账号总览。 */
@@ -86,8 +118,59 @@ function textOutput() {
 }
 
 /** 构造全部工具定义（库内自足，不 import 核心包）。 */
-export function createToolDefinitions({ adapter, broker, store, families, log }) {
+export function createToolDefinitions({ adapter, broker, store, families, log, ctx }) {
   const definitions = []
+
+  definitions.push({
+    name: 'account_bridge_discover',
+    description:
+      'Scan this machine for client logins that the account-bridge plugin could import, WITHOUT signing anything in: ' +
+      'reads the credential files left behind by the Codex CLI, Claude Code, the agy CLI, and reports which of them ' +
+      'are usable. Also reports credential sites whose family is not implemented yet, so you can tell the human ' +
+      'what is not covered instead of guessing. Pass import:true to actually adopt every importable account.',
+    parameters: compileParameters({
+      family: { type: 'string', description: 'Only look at this family. Omit to scan every family.' },
+      import: { type: 'boolean', description: 'Adopt the importable accounts found (default false = report only).' },
+    }),
+    output: textOutput(),
+    async execute(args) {
+      try {
+        const scan = await discoverLocalAccounts({ families, store, ctx, log })
+        if (args.import !== true) {
+          const extra = scan.importable.some((entry) => !entry.alreadyImported)
+            ? ['想全部收下就再调一次本工具并带 `import: true`。']
+            : []
+          return renderScan(scan, extra)
+        }
+
+        const result = await importDiscovered({ families, store, scan, family: args.family, adapter })
+
+        // 这次扫描发生在导入**之前**，所以刚收下的那些此刻还挂在「可以导入」里。
+        // 不把它们挪走的话，输出会自相矛盾：上面说「可以导入 1 个」，下面说「已导入 1 个」。
+        const taken = new Set(result.imported.map((entry) => `${entry.family}\u0000${entry.identity}`))
+        const after = {
+          ...scan,
+          importable: scan.importable.filter((entry) => !taken.has(`${entry.family}\u0000${entry.identity}`)),
+        }
+
+        const extra = ['']
+        if (result.imported.length > 0) {
+          extra.push(`已导入 ${result.imported.length} 个账号：`)
+          for (const entry of result.imported) {
+            extra.push(`- \`${entry.id}\` ${entry.label ?? ''}${entry.sourcePath ? ` ｜ 来自 ${entry.sourcePath}` : ''}`)
+          }
+          extra.push('', '它们现在应该已经出现在模型选择器里了。')
+        } else {
+          extra.push('没有可导入的新账号——要么都导过了，要么本机没有登录态。')
+        }
+        for (const entry of result.skipped) extra.push(`- 跳过 ${entry.family}/${entry.label ?? '?'}：${entry.reason}`)
+        return renderScan(after, extra)
+      } catch (error) {
+        log?.warn?.('account-bridge: account_bridge_discover failed: %s', String(error?.message ?? error))
+        return `本机发现失败：${String(error?.message ?? error)}`
+      }
+    },
+  })
 
   definitions.push({
     name: 'account_bridge_accounts',

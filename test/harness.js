@@ -114,7 +114,9 @@ export function createMockHost(config) {
     },
   }
 
-  apply(ctx, config)
+  // 默认关掉启动扫描：它会真的去读用户主目录、并起子进程跑 `agy models`。
+  // 单测要的是确定性，不是「在跑测试的这台机器上碰巧发现了什么」。
+  apply(ctx, { discoverOnStartup: false, ...(config ?? {}) })
 
   return {
     ctx,

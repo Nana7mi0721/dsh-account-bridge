@@ -108,6 +108,11 @@ export const claudeFamily = {
     ]
   },
 
+  /** 见 codex 族同名方法的说明：统一发现的落盘入口。 */
+  recordFromDiscovery(item) {
+    return recordFromAuth(item.auth, item.label, 'client-import', true)
+  },
+
   // ---------------------------------------------------------------- 登录
 
   login: {
