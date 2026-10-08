@@ -1,0 +1,40 @@
+{
+  "name": "dsh-account-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "description": "账号级反代：把多个订阅账号池化成 DSH 里的一组 provider（首发 codex）",
+  "type": "module",
+  "license": "MIT",
+  "exports": {
+    ".": {
+      "default": "./src/index.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "src",
+    "cordis.patch.yml",
+    "README.md"
+  ],
+  "engines": {
+    "node": ">=20"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-authorization": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-credentials": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-llm": "^0.2.0-rc.1",
+    "@deepseek-ai/dsh-settings": "^0.2.0-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.1"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    },
+    "compatibility": {
+      "runtime": ">=0.2.0-rc.1 <0.3.0-0",
+      "verified": [
+        "0.2.0-rc.2"
+      ]
+    }
+  }
+}
