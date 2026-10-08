@@ -17,6 +17,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
 import { toResponsesInput, toResponsesTools, translateResponsesStream } from '../wire/responses.js'
+import { resolveCliVersion } from '../cli-version.js'
 import { decodeJwtPayload, firstPositiveNumber, randomId, tryJson } from '../util.js'
 
 export const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
@@ -217,8 +218,8 @@ export const codexFamily = {
   async listModels(ctx, payload, signal) {
     const auth = payload.auth ?? {}
     try {
-      const url = `${MODELS_URL}?client_version=${encodeURIComponent(ctx.config.codexClientVersion)}`
-      const response = await ctx.fetch(url, { headers: requestHeaders(auth, { json: true }), signal }, payload.proxy)
+      const url = `${MODELS_URL}?client_version=${encodeURIComponent(resolveCliVersion(ctx, 'codex'))}`
+      const response = await ctx.fetch(url, { headers: requestHeaders(auth, ctx, { json: true }), signal }, payload.proxy)
       if (!response.ok) throw new Error(`HTTP ${response.status}`)
       const json = await response.json()
       const models = Array.isArray(json?.models) ? json.models : Array.isArray(json) ? json : []
@@ -248,7 +249,7 @@ export const codexFamily = {
    * 重置时间**只读 body**：`resets_in_seconds` / `reset_after_seconds` / `resets_at` / `reset_at`。
    */
   async quota(ctx, payload, signal) {
-    const response = await ctx.fetch(USAGE_URL, { headers: requestHeaders(payload.auth ?? {}, { json: true }), signal }, payload.proxy)
+    const response = await ctx.fetch(USAGE_URL, { headers: requestHeaders(payload.auth ?? {}, ctx, { json: true }), signal }, payload.proxy)
     if (!response.ok) return undefined
     const json = await response.json().catch(() => undefined)
     return parseUsage(json)
@@ -275,7 +276,7 @@ export const codexFamily = {
       RESPONSES_URL,
       {
         method: 'POST',
-        headers: requestHeaders(payload.auth ?? {}, { json: true, stream: true }),
+        headers: requestHeaders(payload.auth ?? {}, ctx, { json: true, stream: true }),
         body: JSON.stringify(body),
         signal,
       },
@@ -369,10 +370,11 @@ function claimsEmail(claims) {
 }
 
 /** 上游请求头。 */
-function requestHeaders(auth, { json = false, stream = false } = {}) {
+function requestHeaders(auth, ctx, { json = false, stream = false } = {}) {
   const headers = {
     accept: stream ? 'text/event-stream' : 'application/json',
     originator: ORIGINATOR,
+    version: resolveCliVersion(ctx, 'codex'),
     'session-id': randomId(16).replace(/-/g, '').slice(0, 36),
   }
   if (json) headers['content-type'] = 'application/json'

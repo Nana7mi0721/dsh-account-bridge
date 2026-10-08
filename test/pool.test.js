@@ -6,6 +6,7 @@ import { AccountStore } from '../src/store.js'
 import { createMemoryCredentials } from './harness.js'
 import { CooldownTable } from '../src/health.js'
 import { AccountBridgeAdapter } from '../src/pool.js'
+import { FAMILIES, familyIds } from '../src/families/registry.js'
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} }
 
@@ -215,22 +216,31 @@ test('an empty response is classified as EMPTY_RESPONSE and allowed to fail over
 test('the plugin registers one route and one login flow per family', async () => {
   const host = createMockHost()
   try {
-    assert.deepEqual([...host.services.llm.routes.keys()], ['acct-codex'])
-    assert.deepEqual([...host.services.authorization.flows.keys()], ['dsh-account-bridge/codex-login'])
-    const flow = host.services.authorization.flows.get('dsh-account-bridge/codex-login')
-    assert.equal(flow.label, 'ChatGPT (Codex)')
+    // 从登记处推期望值，这样加族只要改 registry.js，不用回来改测试。
     assert.deepEqual(
-      flow.methods.map((method) => method.id),
-      ['browser', 'import'],
+      [...host.services.llm.routes.keys()],
+      FAMILIES.map((family) => family.route),
     )
+    assert.deepEqual(
+      [...host.services.authorization.flows.keys()],
+      familyIds().map((id) => `dsh-account-bridge/${id}-login`),
+    )
+    for (const family of FAMILIES) {
+      const flow = host.services.authorization.flows.get(`dsh-account-bridge/${family.id}-login`)
+      assert.equal(flow.label, family.displayName)
+      assert.deepEqual(
+        flow.methods.map((method) => method.id),
+        family.login.methods.map((method) => method.id),
+      )
+    }
   } finally {
     host.dispose()
   }
 })
 
-test('disposing the plugin releases the registered route', async () => {
+test('disposing the plugin releases the registered routes', async () => {
   const host = createMockHost()
-  assert.equal(host.services.llm.routes.size, 1)
+  assert.equal(host.services.llm.routes.size, FAMILIES.length)
   host.dispose()
   assert.equal(host.services.llm.routes.size, 0)
 })

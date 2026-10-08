@@ -33,8 +33,12 @@ export const inject = []
 const DEFAULTS = {
   /** 启用哪些族；省略/空数组 = 全部已实现的族。 */
   families: undefined,
-  /** 冒充的 Codex CLI 版本：上游用它决定下发哪份模型目录，太旧会少模型。 */
-  codexClientVersion: '0.51.0',
+  /**
+   * 冒充的上游 CLI 版本。留空 = 自动（查 npm 最新，查不到用兜底常量）。
+   * 上游用它决定下发哪份模型目录、以及要不要限流，见 src/cli-version.js。
+   */
+  claudeClientVersion: undefined,
+  codexClientVersion: undefined,
 }
 
 /** 取一个可能尚未就绪的服务。 */

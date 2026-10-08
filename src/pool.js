@@ -329,6 +329,8 @@ export class AccountBridgeAdapter {
             messages: options.messages,
             tools: options.tools,
             effort: options.effort ?? options.reasoningEffort,
+            system: options.system,
+            maxTokens: options.maxTokens,
             signal: options.signal,
           })
           [Symbol.asyncIterator]()

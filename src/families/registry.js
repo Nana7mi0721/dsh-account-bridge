@@ -3,10 +3,11 @@
  * @module dsh-account-bridge/families/registry
  */
 
+import { claudeFamily } from './claude.js'
 import { codexFamily } from './codex.js'
 
 /** 全部族，顺序即 UI 展示顺序。 */
-export const FAMILIES = [codexFamily]
+export const FAMILIES = [codexFamily, claudeFamily]
 
 /** 全部族的 id。 */
 export function familyIds() {

@@ -3,7 +3,8 @@
 把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
 统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
 
-> 状态：**P0**（骨架 + Codex 族打通，已在真实 DSH 宿主里验证到「route / 登录流 / 工具面」全部可见）。
+> 状态：**P1**（骨架 + Codex 族 + Claude 族打通，两条 route 已在真实 DSH 宿主里验证可见：
+> provider / 模型目录 / 登录流 / 工具面）。
 > 尚未跑过真实登录，也还没有客户端 UI。
 
 ## 它和「key 级接入」的区别
@@ -13,19 +14,40 @@
   以该客户端自己的身份发请求，走的是那条订阅的额度。这也是它需要单独存在的原因：
   凭据怎么拿、怎么刷、怎么在一堆账号之间调度，是 key 级完全不存在的问题。
 
+## 它和宿主内置订阅登录的区别（定位）
+
+DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登：`openai-codex`（ChatGPT Plus/Pro）、
+`anthropic`（Claude Pro/Max）、`xai`（SuperGrok / X Premium）、`github-copilot`、`kimi-coding`、
+`openrouter`、`radius`、`meta`，以及约 40 个 API-key provider。
+
+所以本插件的卖点**不是「能不能接上某个订阅」**——单账号接入宿主已经有了。它是：
+
+| 宿主内置单账号登录 | 本插件 |
+|---|---|
+| 一个 provider 一份凭据 | **一个族 N 个账号**，账号表在插件里 |
+| 额度用完/被限流 = 报错 | 429 / 配额耗尽**自动换下一个账号** |
+| 无失败记忆，每次都撞同一堵墙 | 按 `(族, 账号, 模型)` 记冷却，冷却中的账号直接跳过 |
+| 换账号 = 换 provider | 模型选择器里是**并集**，会话内**粘住**同一账号（保住上游 prompt cache） |
+| 一个插件一族 | 一个插件多族，共用一套调度与一套 UI |
+
 ## 现在能做什么
 
 | 能力 | 状态 |
 |---|---|
-| 把 Codex 家族注册成一个 provider route（`acct-codex`，显示名 `ChatGPT (Codex)`） | ✅ 真机验证 |
+| 把 Codex 家族注册成 provider route（`acct-codex`，显示名 `ChatGPT (Codex)`） | ✅ 真机验证 |
+| 把 Claude 家族注册成 provider route（`acct-claude`，显示名 `Claude (Subscription)`） | ✅ 真机验证 |
 | 模型目录进 GUI 选择器（账号池 = 所有账号目录的并集） | ✅ 真机验证（无账号时为空目录，不报错） |
-| 登录流进 `ctx.authorization`（`dsh-account-bridge/codex-login`，两种方式） | ✅ 真机验证 |
+| 目录未知时**不宣称任何 reasoning effort**（不承诺兑现不了的东西） | ✅ 真机验证 |
+| 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude}-login`，各两种方式） | ✅ 真机验证 |
 | 三个工具：`account_bridge_accounts` / `account_bridge_login` / `account_bridge_accounts_remove` | ✅ 真机验证 |
 | 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 单测（含 API-key 模式如实报「不可导入」） |
+| 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 单测 + 真机（本机无该文件，如实返回空） |
+| Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
+| 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
 | 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
-| 真实登录 + 真实推理 | ⛔ 未验证（需要一个 ChatGPT 订阅账号） |
+| 真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 客户端设置界面（`settings.section` / 用量徽章） | ⛔ 未做 |
-| Antigravity / Claude 等其余族 | ⛔ 未做（架构已就位，见 `src/families/`） |
+| Antigravity（`agy`）等其余族 | ⛔ 未做（架构已就位，见 `src/families/`） |
 
 ## 安装（开发期）
 
@@ -52,18 +74,21 @@ src/
   store.js            账号记录（落在 ctx.credentials）
   tools.js            工具面（库内自足，不 import 核心包）
   http.js             per-账号 出站代理（undici ProxyAgent）
+  cli-version.js      上游客户端版本号（查 npm registry，失败静默回退）
   login/
     loopback.js       PKCE + 回环回调服务器
     broker.js         「拿到 URL」与「登录完成」解耦
   wire/
     sse.js            SSE 解析
-    responses.js      DSH 消息 ↔ OpenAI Responses API
+    responses.js      DSH 消息 ↔ OpenAI Responses API（Codex）
+    anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
+    claude.js         Claude 族
     registry.js       族注册表
 ```
 
-## 两条真机才暴露的契约（已钉成回归测试）
+## 三条真机/源码才暴露的契约（已钉成回归测试）
 
 1. **适配器是鸭子类型，但少一个方法就当场注册失败。**
    `registerAdapter` 在注册时**无条件**调用 `adapter.providerRetryPolicy(provider)`；
@@ -78,6 +103,11 @@ src/
    `ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-tools'`。
    需要核心能力时的两条正路：① 经 `ctx` 服务；② 库内自足实现（本插件的工具定义就是自己拼的）。
    → 见 `test/contract.test.js` 的静态检查。
+
+3. **`finish.reason.kind` 只认三个值：`'stop' | 'tool-calls' | 'max-tokens'`。**
+   写别的（比如 `'success'` / `'tool-use'`）不会报错，但语义**静默丢失**——宿主拿不到
+   「这轮是工具调用」就不会续跑，拿不到 `'max-tokens'` 就不会做截断处理。
+   → 见 `test/anthropic.test.js` 的六种 `stop_reason` 断言。
 
 ## 测试
 
@@ -103,5 +133,5 @@ node --test "test/*.test.js"
 
 ## 未定事项
 
-- 是否建 git 仓库（等初版过目）。
-- 首发族范围、第二档（zcode / minimax）、通用兜底族 `generic`：见计划书。
+- LICENSE：尚未添加（社区 DSH 插件惯例是 MIT，但加之前需要作者确认——不加就等于保留所有权利）。
+- 首发族补齐顺序、第二档（zcode / minimax）、通用兜底族 `generic`：见计划书。

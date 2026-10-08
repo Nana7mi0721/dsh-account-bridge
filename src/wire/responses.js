@@ -258,7 +258,8 @@ export async function* translateResponsesStream(response, options = {}) {
     error.code = 'EMPTY_RESPONSE'
     throw error
   }
-  yield { type: 'finish', reason: { kind: finishReason === 'max-tokens' ? 'max-tokens' : 'success' } }
+  // DSH 只认 'stop' | 'tool-calls' | 'max-tokens'（见 wire/anthropic.js 的同名注释）。
+  yield { type: 'finish', reason: { kind: finishReason === 'max-tokens' ? 'max-tokens' : 'stop' } }
 }
 
 /** 把 Responses 的输出项翻成 DSH 的完整块。 */
