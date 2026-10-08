@@ -39,6 +39,13 @@ const DEFAULTS = {
    */
   claudeClientVersion: undefined,
   codexClientVersion: undefined,
+  /**
+   * agy CLI 的位置。留空 = 走 PATH 上的 `agy`。
+   * 这一族是**驱动本机 CLI** 的，路径不对整族直接不可用（报错会说你没装）。
+   */
+  agyBin: undefined,
+  /** agy 的工作目录。agy 是个 agent，会往 cwd 里写东西；留空 = 继承进程 cwd。 */
+  agyWorkdir: undefined,
 }
 
 /** 取一个可能尚未就绪的服务。 */

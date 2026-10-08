@@ -3,9 +3,9 @@
 把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
 统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
 
-> 状态：**P1**（骨架 + Codex 族 + Claude 族打通，两条 route 已在真实 DSH 宿主里验证可见：
-> provider / 模型目录 / 登录流 / 工具面）。
-> 尚未跑过真实登录，也还没有客户端 UI。
+> 状态：**P2**（骨架 + Codex 族 + Claude 族 + Antigravity 族；三条 route 已在真实 DSH 宿主里验证可见：
+> provider / 模型目录 / 登录流 / 工具面；Antigravity 族已跑通真实推理）。
+> 尚未跑过 Codex/Claude 的真实登录，也还没有客户端 UI。
 
 ## 它和「key 级接入」的区别
 
@@ -36,18 +36,44 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 |---|---|
 | 把 Codex 家族注册成 provider route（`acct-codex`，显示名 `ChatGPT (Codex)`） | ✅ 真机验证 |
 | 把 Claude 家族注册成 provider route（`acct-claude`，显示名 `Claude (Subscription)`） | ✅ 真机验证 |
+| 把 Antigravity 家族注册成 provider route（`acct-agy`，显示名 `Antigravity (Google)`） | ✅ 真机验证 |
 | 模型目录进 GUI 选择器（账号池 = 所有账号目录的并集） | ✅ 真机验证（无账号时为空目录，不报错） |
 | 目录未知时**不宣称任何 reasoning effort**（不承诺兑现不了的东西） | ✅ 真机验证 |
-| 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude}-login`，各两种方式） | ✅ 真机验证 |
+| 登录流进 `ctx.authorization`（`dsh-account-bridge/{codex,claude,agy}-login`） | ✅ 真机验证 |
 | 三个工具：`account_bridge_accounts` / `account_bridge_login` / `account_bridge_accounts_remove` | ✅ 真机验证 |
 | 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 单测（含 API-key 模式如实报「不可导入」） |
 | 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 单测 + 真机（本机无该文件，如实返回空） |
+| 驱动本机 `agy` CLI 推理（NDJSON 流 → DSH chunk，含 usage 与失败归类） | ✅ 真机推理通过 |
+| 本机 agy 登录探测与导入（`agy models` 探针 + 14 个模型的真实目录解析） | ✅ 真机验证 |
 | Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
 | 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
 | 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
-| 真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
+| Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 客户端设置界面（`settings.section` / 用量徽章） | ⛔ 未做 |
-| Antigravity（`agy`）等其余族 | ⛔ 未做（架构已就位，见 `src/families/`） |
+| 其余族（WorkBuddy / Qoder / zcode / minimax / 通用兜底 `generic`） | ⛔ 未做（架构已就位，见 `src/families/`） |
+
+## Antigravity 族（`agy`）：四个实话
+
+这一族是**驱动本机 `agy` CLI 子进程**，不是直连 Google 私有 API。这是个有代价的选择，
+下面四条都是实测出来的，写在这里免得你装完才发现：
+
+1. **必须本机装了 agy CLI 并已登录。** 「登录」得你自己在**终端**里跑一次 `agy` 完成——
+   授权码要贴回 agy 自己的控制台，而 DSH 是 GUI 进程、给不了它控制台，
+   管道喂码 agy 根本不读（60 秒硬超时）。所以插件只做「探测 + 导入」，不做插件内登录。
+2. **每一回合固定烧掉约 27k input tokens**，哪怕你只问一个「PONG」——
+   那是 agy 自带的系统提示 + 57 个工具 schema。用这一族要按这个量级算成本。
+3. **它是委派型，不是工具调用型。** agy 用它自己的 57 个工具、在它自己的 cwd 里干活；
+   DSH 的工具给不了它，它的工具活动也不会变成 DSH 的 tool-call 块。我们只把文本交回 DSH。
+4. **Windows / macOS 上实际只能挂一个账号。** agy 1.2.8 把令牌存进**系统凭据管理器**
+   （Windows 是 `cmdkey` 里的 `LegacyGeneric:target=gemini:antigravity`），那是**按用户**
+   而不是按 HOME 隔离的，target 名也不含路径成分 ⇒ 给子进程换 HOME 隔离不出第二个账号。
+   与其假装支持多账号，不如照实说。
+
+顺带一提：这一族**不在**宿主内置 `llm-pi-ai` 的约 40 个 provider 里（那里面有 `openai-codex`、
+`anthropic`、`xai`… 但没有 Antigravity），所以它补的是宿主确实没有的格子。
+
+配置项：`agyBin`（不在 PATH 上时给绝对路径）、`agyWorkdir`（agy 的工作目录，它是个 agent，
+会往 cwd 里写东西）。
 
 ## 安装（开发期）
 
@@ -75,6 +101,7 @@ src/
   tools.js            工具面（库内自足，不 import 核心包）
   http.js             per-账号 出站代理（undici ProxyAgent）
   cli-version.js      上游客户端版本号（查 npm registry，失败静默回退）
+  cli-run.js          驱动上游 CLI 的子进程层（进程树 kill / 超时 / 撕裂行拼接）
   login/
     loopback.js       PKCE + 回环回调服务器
     broker.js         「拿到 URL」与「登录完成」解耦
@@ -82,9 +109,11 @@ src/
     sse.js            SSE 解析
     responses.js      DSH 消息 ↔ OpenAI Responses API（Codex）
     anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude）
+    agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
     claude.js         Claude 族
+    agy.js            Antigravity 族（驱动本机 agy CLI）
     registry.js       族注册表
 ```
 
@@ -116,6 +145,12 @@ node --test "test/*.test.js"
 ```
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
+
+有一例真机推理测试默认跳过（每回合要烧 27k tokens，不该在每次 `npm test` 时都跑）：
+
+```bash
+BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
+```
 
 ## 设计要点
 
