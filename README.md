@@ -434,7 +434,12 @@ test/
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
 docs/
   family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
+  host-writes.md      **真要写宿主配置之前先读这一份**：四条红线、要避开的 6 个 row id
 ```
+
+> `docs/host-writes.md` 记的是「将来若去写 `~/.dsh/profiles/*/cordis.patch.yml` 必须怎么做」：
+> 那份文件是**多主**的（magpie 也在写，它自己的 `dshWrites` 锁只防它自己的进程），
+> 整份重写会把别人的行盖掉。**今天本仓一个字节都不写它**，`test/host-writes.test.js` 看着这条线。
 
 > `docs/family-contract.md` 是本仓最该先读的一份文档：族的对象形状、`stream` 的 chunk 契约、
 > 失败归类表、凭据记录与写回 CAS、登录与发现的入口、测试与真机验收清单、提交前自检，都在里面。
@@ -513,7 +518,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**1042 个用例，1029 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**1045 个用例，1032 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
