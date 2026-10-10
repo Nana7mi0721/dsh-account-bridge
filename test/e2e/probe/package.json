@@ -1,0 +1,13 @@
+{
+  "name": "dsh-e2e-probe",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "main": "index.js",
+  "description": "End-to-end probe for dsh-account-bridge: runs inside a real host and writes a JSON report.",
+  "dsh": {
+    "bundle": {
+      "patch": "./cordis.patch.yml"
+    }
+  }
+}

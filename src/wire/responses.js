@@ -2,6 +2,9 @@
  * DSH 会话 ⇄ OpenAI Responses API 的线协议翻译。
  *
  * 只翻译 DSH 真正会产生的形状；不做「什么都能转」的通用层。
+ * 停止原因的双向全表与「未知值原样透传、不伪造成 stop」这条规矩借自 RelayKit
+ * （AGPL-3.0，只借规则不搬代码）；见 `THIRD_PARTY_NOTICES.md`。
+ *
  * @module dsh-account-bridge/wire/responses
  */
 
@@ -275,7 +278,7 @@ export async function* translateResponsesStream(response, options = {}) {
    *
    * 存在的理由：`response.output_item.done` 里的项**可以**不带 `summary`/`content`，
    * 而收尾块是权威的——没有这个兜底，一段刚才已经显示过的思考会在收尾时被换成空块。
-   * golden 快照第一次生成就把这件事照出来了（见 `test/golden/`）。
+   * 生成 golden 快照那会儿第一次把这件事照出来了（快照随单元测试一起删了）。
    */
   const streamedText = new Map()
   const begin = function* (index, blockType, seed = {}) {

@@ -352,62 +352,57 @@ if (!response.ok) throw await httpError(response, await response.text(), 'foo')
 
 ## 8. 测试
 
-### 8.1 跑法
+### 8.1 这个仓库只有端到端测试
+
+没有单元测试，也没有回归测试文件。写完一个族要做的是四件事：
+
+1. **在 `test/e2e/probe/index.js` 里加一条检查**：用 `account_bridge_*` 工具造出需要的账号 →
+   让池子**真的发一次请求** → 断言宿主看见的那份东西（chunk 序列 / `finish.reason.kind` /
+   `failure.code` / 回环数据面的字段）；
+2. **需要上游配合演事故时，在 `test/e2e/mock-upstream.mjs` 里加一个模型**（它本来就是
+   故意难伺候的验收台：不认 `stream_options`、不认 `cache_control`、Anthropic 那条路只发
+   `data:` 不发 `event:`、还有几个专演事故的模型）。**不许为了让自己那关过而把它改宽容**；
+3. **静态规矩加进 `test/e2e/preflight.mjs`**——只有「一眼能判定、且错了后果很贵」的才配
+   （例：源码不许按裸模块名 import 核心包、会写盘的源码只准是哪两个文件）；
+4. 跑：
 
 ```bash
-node --test "test/foo.test.js"      # 单族
-node --test "test/*.test.js"        # 全量
+npm test                          # 全套端到端
+node test/e2e/harness.mjs         # 同时把宿主输出转出来
+node test/e2e/harness.mjs --quiet # 安静模式
 ```
 
-**必须写 glob。** `node --test test/`（目录形式）在 Node v24 上报
-`Cannot find module .../test`。
+断言写在**探针里**，`test/e2e/e2e.test.js` 只负责把报告翻译成测试结果，一行判断都不要加。
 
-### 8.2 用现成的 harness
+**为什么不留单元测试**：它们证明的是「我以为的协议是自洽的」。这个插件几乎每一条规矩
+都是从真机撞出来的（思考算不算输出、失败归哪一类、签名要不要回放），所以留下的证据只有真机。
+代价要认：单元测试能守住「我知道的那条规则」不被改动，端到端守不住这个——它只证明接上去是对的。
 
-```js
-import { createMockHost, recordingCtx, sseResponse, errorResponse } from './harness.js'
+### 8.2 一条检查要覆盖到哪几类
 
-const { ctx, credentials, dispose } = createMockHost()
-// ctx 上已经有 llm / tools / authorization / credentials 的假实现
-// 默认 discoverOnStartup: false，不会在构造时打网络
-
-const { ctx: recCtx, calls } = recordingCtx(async (url, init) => sseResponse([...]))
-// calls 里是 [{ url, init, proxy }]，用来断言「发出去的请求长什么样」
-```
-
-`sseResponse(events)` 的事件写成 `{ event: 'content_block_start', data: {...} }`。
-**注意**：它**总是**会写出一行 `event:`，所以表达不了「上游只发 `data:`、没有事件名」
-这种情况——那种测试要自己造响应（见 `test/anthropic.test.js` 里的例子）。
-
-`errorResponse(status, body, headers)` 造一个非 2xx 响应。
-
-### 8.3 一定要测到的几类
-
-- **请求形状**：URL、每个头、body 的关键字段（尤其伪装身份的头，少一个就是静默失效）；
-- **凭据不泄漏**：令牌不该出现在日志 / 错误消息里（用 `redact`）；
-- **失败归类**：401 → `AUTH`、429+quota → `QUOTA`、上游 400 的 context 错误 →
-  `CONTEXT_WINDOW_EXCEEDED`；
+- **注册与目录**：`llm.listProviders()` 里有这条 route、`listModels()` 不为空、
+  `resolveModelInfo()` 的 `contextWindow` 是正整数、只出图的模型没进选择器；
+- **请求形状**：发出去的 URL / 头 / body 关键字段——尤其是伪装身份的那几个头，
+  少一个就是静默失效（`mock-whoami` 这类模型可以把它回显出来给你断言）；
+- **凭据不泄漏**：`/account-bridge/state` 的响应里**绝不该**出现 `auth.access` / `auth.refresh` /
+  `auth.apiKey` 的值；
+- **失败归类**：401 → `AUTH`、429 + 额度词 → `ACCOUNT_QUOTA`、429 + 限流词 → `RATE_LIMIT`
+  且 `providerRetryAfterMs` 有值；
 - **chunk 序列**：`block-start` → delta → `block-end` → `usage` → `finish`，且
   `finish.reason.kind` 只在三个合法值里；
-- **空回答抛 `EMPTY_RESPONSE`**；
-- **`payload.proxy` 透传**到 `ctx.fetch`；
-- **`discover` 的四种结果**：可导入 / 已导入 / 有凭据但导不进来（带 reason）/ 没装。
+- **空回答抛 `EMPTY_RESPONSE`**，以及**失败那次的思考没有泄漏给调用方**。
 
-### 8.4 联网测试要能跳过
+### 8.3 端到端跑在真宿主里，不在假宿主里
 
-真机测试（真的打上游）**默认必须跳过**，用一个环境变量开：
-
-```js
-test('...', { skip: process.env.BRIDGE_LIVE_FOO !== '1' }, async () => { … })
-```
-
-理由：它会烧真实额度、还要求本机装好并登录了那个客户端。
+`test/e2e/harness.mjs` 起的是**真的无头 DSH**（`<exe> <cli.js> --profile e2e`），插件按 `link:`
+装进去 ⇒ **改 `src/` 立刻生效，改探针要重跑**。所以「假宿主上过了」这种话在这里不成立，
+但也别把它当成真上游：探针面对的是假上游，真上游仍要人工过一遍（见 §9）。
 
 ---
 
 ## 9. 真机验收（写完必须做）
 
-单测只能证明「我以为的协议是自洽的」。真机验收清单：
+端到端探针证明了「接上真宿主是对的」，但它的上游是假的。**真上游**仍要人工过一遍：
 
 1. 在隔离 profile 里跑起来（`bash _dsh_research/dshrun.sh --profile plug`，
    `DSH_HOME` 指向 `_dsh_test`，**不碰用户真实 profile**）；
@@ -418,14 +413,14 @@ test('...', { skip: process.env.BRIDGE_LIVE_FOO !== '1' }, async () => { … })
 6. `authorization.list()` 里有 `<route 的登录流>`；
 7. 工具面注册成功。
 
-第 5 条最容易漏——注册上了不等于能用。
+第 5 条最容易漏——注册上了不等于能用。本机没有那种账号时，**如实写「真机未验」，不许写成通过**。
 
 ---
 
 ## 10. 提交前自检
 
 - [ ] 没有 `import ... from '@deepseek-ai/*'`（profile 的 `node_modules` 里没有这些包，
-      只能经 `ctx` 服务访问；`test/contract.test.js` 有静态检查会拦）
+      只能经 `ctx` 服务访问；`test/e2e/preflight.mjs` 有静态检查会拦）
 - [ ] 没有 `export default`
 - [ ] `route` 没和别的族撞
 - [ ] 上游调用一律 `ctx.fetch(url, init, payload.proxy)`
@@ -433,5 +428,7 @@ test('...', { skip: process.env.BRIDGE_LIVE_FOO !== '1' }, async () => { … })
       （三处一致：会话头 / `metadata.user_id` / `prompt_cache_key`）
 - [ ] `refresh` 返回的是 **auth 对象**，且带全所有会变的键
 - [ ] 一次性轮换的令牌有写回，且有 generation CAS
+- [ ] 借来的代码/规则在 `THIRD_PARTY_NOTICES.md` 里登记了，且文件头注明了来源
 - [ ] 没有的证据写「未知」，没有的额度不报，不支持的多账号不假装支持
-- [ ] 真机验收七条都过了
+- [ ] `npm test` 绿（端到端），探针里加了这座族自己的检查
+- [ ] 真机验收七条过了，或者**如实写明哪几条没条件过**

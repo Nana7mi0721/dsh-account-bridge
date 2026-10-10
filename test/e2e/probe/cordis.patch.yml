@@ -1,0 +1,4 @@
+# 把探针插进临时 profile 的 loader。`insert` 是追加，不覆盖宿主自己的条目。
+- insert:
+    - id: dsh-e2e-probe
+      name: dsh-e2e-probe

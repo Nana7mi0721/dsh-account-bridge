@@ -23,6 +23,9 @@
  * 版本不认识、块数不齐、模型换了——统统一声不响地降级成「不带这个状态」，
  * 宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400。
  *
+ * 「该不该回放、以及按 `kind` 分命名空间」这个判断来自 V1ki/dsh-plugin-subscriptions（MIT）。
+ * 来源与改写范围见 `THIRD_PARTY_NOTICES.md`。
+ *
  * @module dsh-account-bridge/wire/replay
  */
 

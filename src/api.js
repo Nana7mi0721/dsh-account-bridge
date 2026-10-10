@@ -321,8 +321,8 @@ export function registerAccountBridgeRoutes(options) {
      *
      * 与 `/pool lost` 读的是**同一本账**。为什么要有一条 HTTP 面：那本账只活在内存里，
      * 而日志在桌面版里不落到我们能读的地方（`ctx.logger` 的去向由宿主决定）。
-     * 没有这条面，「诊断真的产生了」这件事就只能靠单测里的假宿主来证——而这一整块的
-     * 教训恰恰是「单测绿不等于生产路径上有人在听」。
+     * 没有这条面，「诊断真的产生了」这件事就只能靠假宿主的断言来证——而这一整块的
+     * 教训恰恰是「断言绿不等于生产路径上有人在听」。
      */
     async diagnostics() {
       return adapter.diagnostics?.() ?? { requests: 0, lostRequests: 0, entries: [], summary: {}, hasErrors: false, dropped: 0 }

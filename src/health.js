@@ -33,8 +33,8 @@ export { failureWords }
  *
  * **这里的名字必须是族的 `id`，不是显示名。** 写错一个名字不会报错，只会让那条规则
  * 静默失效——`'antigravity'` 是显示名的一部分，真正的族 id 是 `'agy'`，于是
- * Antigravity 的额度用尽会把整账号所有模型一起停 15 分钟（`test/contract.test.js`
- * 现在有一条用例逐个核对集合里的名字真在 registry 里）。
+ * Antigravity 的额度用尽会把整账号所有模型一起停 15 分钟（当时有一条用例逐个核对集合里的
+ * 名字真在 registry 里，那份测试随单元测试删了 —— **改这个集合时请对着 `src/families/registry.js` 数一遍**）。
  */
 export const MODEL_SCOPED_QUOTA_FAMILIES = new Set(['claude', 'agy'])
 

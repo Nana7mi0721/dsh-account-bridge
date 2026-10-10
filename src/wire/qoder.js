@@ -3,7 +3,7 @@
  *
  * 这一份 wire 和仓库里别族的都不一样：Qoder **不说** OpenAI 也不说 Anthropic 的方言，
  * 它用的是 qodercli 自己的信封 + 一套叫 COSY 的签名。所以请求构造与流解析都得自己写，
- * 而为了能单测，这里全部写成**纯函数**——签名里每一个随机量（AES 密钥、请求 id、
+ * 而为了能把字节钉死，这里全部写成**纯函数**——签名里每一个随机量（AES 密钥、请求 id、
  * 时间戳）和 RSA 公钥都从参数进来，不给就现取。
  *
  * 逆向结论的来源：`_dsh_research/research/_part-qoder.md` 与
@@ -29,7 +29,8 @@ import { mergeUsageNonZero } from './usage.js'
  *
  * 硬编码的理由和上游客户端一样：它是**公**钥，不是凭据，泄漏与否不改变安全性；
  * 换密钥意味着上游改了协议，那时这一整份 wire 都要重写。
- * 允许参数覆盖只是为了单测能钉死字节（见 `test/fixtures/qoder-cosy-vector.json`）。
+ * 允许参数覆盖只是为了能用固定输入把签名钉死（当时的定标向量放在 `test/fixtures/`，
+ * 随单元测试一起删了；要重建就照 `_dsh_research` 里那份 Python 第二实现复核器做）。
  */
 export const COSY_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
 MIGfMA0GCSqGSIb3DQEBAQUAA4GNADCBiQKBgQDA8iMH5c02LilrsERw9t6Pv5Nc
@@ -54,7 +55,7 @@ export const QODER_USER_AGENT = `qoder/${QODER_IDE_VERSION}`
  * 端点的行为，不是 chat / model-list / quota 的行为。
  * 活动我们不接（本插件不做签到），所以这里**不该**出现 `10`：给 chat 发一个桌面
  * 标识是拿没验证过的值去赌一个有静默失败历史的字段。
- * 见 {@link QODER_DESKTOP_CLIENT_TYPE} 与单测 `Cosy-Clienttype is the generic 5`。
+ * 见 {@link QODER_DESKTOP_CLIENT_TYPE}——**两者不是一回事，别把 `10` 拿来给 chat 用**。
  */
 export const QODER_CLIENT_TYPE = '5'
 /** 桌面标识，**只**用于 `/sash/...` 活动端点；本族不发起那些请求，故仅作记录。 */
@@ -245,7 +246,7 @@ export function openApiHeaders(region) {
  * @param {string} input.url 真实请求 URL（签名路径由它推导）
  * @param {{userID: string, authToken: string, name?: string, email?: string, machineID?: string}} input.credentials
  * @param {string} [input.publicKey] 覆盖 COSY 公钥（默认 {@link COSY_PUBLIC_KEY}）
- * @param {object} [input.random] 注入随机量/时间，仅单测与定标使用
+ * @param {object} [input.random] 注入随机量/时间，仅供定标与排障使用
  * @param {string} [input.random.cosyKey] 注入已加密的 aesKey（让签名完全确定）
  * @returns {Record<string, string>}
  */

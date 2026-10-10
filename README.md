@@ -7,14 +7,17 @@
 > `workbuddy` / `commandcode` / `grok` / `copilot` / `trae` / `generic`）+ 本机账号统一发现 +
 > 设置页账号池面板 + `/pool` 命令族。11 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
-> **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族单测齐全但**没有可用的真账号**，
+> **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
 >
 > 当前进行中：**P7 深度改进**（见 `dsh-account-bridge-深度改进计划书.md`）——修「对上游不诚实」
-> 与「账号选得不对」这两类问题，11 个工作包。
+> 与「账号选得不对」这两类问题，11 个工作包，**W0–W11 全部完成**。
+>
+> 测试：**只有端到端测试**（`test/e2e/`，起假上游 + 起真的无头宿主），
+> 单元测试与回归测试都已删除；规矩写在 [AGENTS.md](AGENTS.md)。
 >
 > 许可：**MIT**。借用的上游代码逐条记在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，
-> 并由 `test/notices.test.js` 双向强制（借了没登记、登记了文件不存在，都会红）。
+> 并由 `test/e2e/preflight.mjs` 的静态检查强制（借了没在自己文件头注明来源就会红）。
 
 ## 它和「key 级接入」的区别
 
@@ -54,24 +57,24 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | **本机账号统一发现**：一次扫完所有族的凭据位点，如实分四类（可导入 / 已导入 / 有凭据但导不进来 / 这族还没写） | ✅ 真机验证 |
 | **一键导入**：`account_bridge_discover({import:true})` 把扫到的登录态收进账号池，无需任何粘贴或登录 | ✅ 真机验证（导入后 `acct-agy` 立刻列出 14 个模型） |
 | 启动时后台扫一遍本机登录态并打日志（可用 `discoverOnStartup:false` 关掉） | ✅ 真机验证 |
-| 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 单测 + 真机（含 API-key 模式如实报「不可导入」） |
-| 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 单测 + 真机（本机无该文件，如实返回空） |
+| 本机 Codex CLI 登录态发现与导入（`~/.codex/auth.json`） | ✅ 真机（含 API-key 模式如实报「不可导入」） |
+| 本机 Claude Code 登录态发现与导入（`~/.claude/.credentials.json`） | ✅ 真机（本机无该文件，如实返回空） |
 | 驱动本机 `agy` CLI 推理（NDJSON 流 → DSH chunk，含 usage 与失败归类） | ✅ 真机推理通过 |
 | 本机 agy 登录探测与导入（`agy models` 探针 + 14 个模型的真实目录解析） | ✅ 真机验证 |
 | 本机 MiniMax Code 登录态发现与导入（`~/.minimax/auth/prod/{en,cn}/mcode-public/auth.json`） | ✅ 真机验证 |
 | MiniMax Code 令牌刷新 + **写回桌面端**（generation CAS，防两边互相踩） | ✅ 真机验证（对真实文件跑通，令牌每刷必换是实测事实） |
-| Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
-| 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
+| Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 端到端（探针里那条 Anthropic 方言推理；只发 `data:` 不发 `event:` 的响应也认） |
+| 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ⚠️ 只在真机请求里体现（本机没有这两家订阅，端到端探针不覆盖） |
 | 账号池调度：首发实质输出前才允许换号 + 冷却表 + 退避 | ✅ 真机验证 |
 | 选号排序（额度档位 / 节奏 / 被限流过的沉底） | ✅ 真机验证（fake 上游上看得到谁先上） |
 | 会话亲和：按上游自报的缓存读取量决定粘不粘，四态可切 | ✅ 真机验证（关掉粘性排序就会抢走） |
 | 亲和记录落盘 `$DSH_HOME/storages/account_bridge.json`，重启不失忆 | ✅ 真机验证（换一个宿主进程仍认原来的账号） |
-| 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
-| 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文） |
-| 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
-| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ✅ 真机验证（路由真机可用 + 28 个面板用例；面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
+| 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Qoder、没有 PAT） |
+| 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 端到端验到 route 与元数据；**真机仅验到第一条**（本机凭据是 5.6 的密文） |
+| 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
+| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
-| **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ✅ 单测（席位形状、按 route 过滤、多卡共享一次请求）；**真的在浏览器里看见**待人工确认 |
+| **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 用量徽章（`SubscriptionUsageBadge` 那种常驻角标） | ⛔ 未做（额度只在面板里按需查） |
 | **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 8 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
@@ -236,8 +239,9 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
 `generation` 做 CAS、先写凭据再写状态镜像。CAS 基准是**刷新前现读**的，不是导入时记下的那个。
 
 **开发期真出过事。** 写回最初拿 `auth.generation ?? 0` 当基准，而账号记录里根本没有这个字段 ⇒
-基准恒为 0、文件里是 16 ⇒ CAS 永远不匹配、永远静默不写。单测没抓住是因为测试自己贴心地
-传了和文件一致的 generation。真机跑完的表现是：推理成功、记录里的令牌也换了，
+基准恒为 0、文件里是 16 ⇒ CAS 永远不匹配、永远静默不写。当时的单元测试没抓住，是因为它自己
+贴心地传了和文件一致的 generation（**这正是本仓现在不留单元测试的原因之一**）。
+真机跑完的表现是：推理成功、记录里的令牌也换了，
 **桌面端的文件纹丝不动**——服务端那条令牌已经作废。最后本机三个令牌（文件里的、探针备份里的、
 记录里的）全部 `invalid_grant`，只能重新登录。
 
@@ -245,8 +249,7 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
 
 - **读不到桌面端凭据就根本不刷。** 写不回去的刷新等于单方面把用户踢下线，而且不可逆，
   所以宁可报 `AUTH` 让账号进冷却并提示「先打开 MiniMax Code 让它自己刷一轮」。
-  `test/minimax.test.js` 里 `an externally owned account refuses to refresh when the desktop
-  file is gone` 守着这条。
+  代码里那条守卫在 `src/families/minimax.js`（`readDesktop()` 读不出来就抛 AUTH）。
 - **`loginEpoch` 进身份指纹。** 上面那个 bug 还顺带让同一份登录态被导入了两次
   （记录里是新令牌、文件里是旧令牌，指纹不一致 ⇒ 多出一个 `minimax-2`）。桌面端每次登录会
   生成一个 `loginEpoch` UUID，它不随刷新变化，正好当稳定标识。
@@ -422,16 +425,12 @@ src/
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
-  mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
-  responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
-  commands.test.js    `/pool` 命令族（含一个照抄宿主校验规则的假 `commands` 服务）
-  select.test.js      排序判据（含「重置时刻截断到小时」「pace 必须离散成层」两条）
-  select-wiring.test.js    池子有没有把额度喂进去、有没有按裁决换号
-  affinity.test.js    四态、粘性键、落盘与重建、遗忘的粒度
-  affinity-wiring.test.js  粘性与排序真的会给出不同答案的那些场景
-  identity.test.js    会话身份：同账号幂等、跨账号不同、裸会话 id 不许出现在请求里
-  notices.test.js     许可与署名台账的双向自检（借了没登记 / 登记了文件不存在，都会红）
-  fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
+  e2e/
+    harness.mjs       端到端编排：起假上游、起真的无头宿主、建临时 profile、收摊
+    mock-upstream.mjs 假上游（**故意难伺候的验收台**；不许为了让自己那关过而改宽容）
+    preflight.mjs     四条静态前置检查（源码规矩、署名台账、写盘面、宿主红线）
+    e2e.test.js       唯一的测试文件：把探针报告翻译成测试结果
+    probe/            仓内探针：在真宿主里造账号、发真请求、断言宿主看见的那份东西
 docs/
   family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
   host-writes.md      **真要写宿主配置之前先读这一份**：四条红线、要避开的 6 个 row id
@@ -439,7 +438,8 @@ docs/
 
 > `docs/host-writes.md` 记的是「将来若去写 `~/.dsh/profiles/*/cordis.patch.yml` 必须怎么做」：
 > 那份文件是**多主**的（magpie 也在写，它自己的 `dshWrites` 锁只防它自己的进程），
-> 整份重写会把别人的行盖掉。**今天本仓一个字节都不写它**，`test/host-writes.test.js` 看着这条线。
+> 整份重写会把别人的行盖掉。**今天本仓一个字节都不写它**，
+> `test/e2e/preflight.mjs` 里那条「会写盘的源码只准是哪两个文件」看着这条线。
 
 > `docs/family-contract.md` 是本仓最该先读的一份文档：族的对象形状、`stream` 的 chunk 契约、
 > 失败归类表、凭据记录与写回 CAS、登录与发现的入口、测试与真机验收清单、提交前自检，都在里面。
@@ -461,40 +461,45 @@ docs/
 `claude` 族把**同一个值**发在三处——`x-claude-code-session-id` 头、`metadata.user_id`（新 JSON 形态）、
 以及（`codex` / `grok`）`prompt_cache_key`；三处必须一致，否则「成套」就破了。
 拿不到账号或会话时**一个都不发**，也不会退回去发裸 id。
-`test/identity.test.js` 里有断言直接扫整个请求，**裸会话 id 出现即失败**。
+（这条原先由 `test/identity.test.js` 扫整个请求守着，那份测试随单元测试一起删了；
+动身份那几行时请自己核一遍：同账号幂等、跨账号不同、裸会话 id 不许出现。）
 
 > 另外，`CLAUDE_CODE_IDENTITY` 里原本有一句
 > "…running within the DeepSeek Harness account bridge."——那等于在第一段 system 里主动
 > 告诉上游「这不是 Claude Code，是一个第三方桥」。已改为与官方客户端逐字一致的措辞，
 > 并有测试钉住「system 里不许出现 bridge / harness」。
 
-## 五条真机/源码才暴露的契约（已钉成回归测试）
+## 五条真机/源码才暴露的契约
+
+> 这五条原先各有一条回归测试钉着，那些测试随单元测试一起删了（见 [AGENTS.md](AGENTS.md)）。
+> 事实仍然成立，但**现在没有自动守卫**——改到相关那几行时请对着这一节自己核。
 
 1. **适配器是鸭子类型，但少一个方法就当场注册失败。**
    `registerAdapter` 在注册时**无条件**调用 `adapter.providerRetryPolicy(provider)`；
    `?? resolveRetryPolicy(...)` 只兜返回值，兜不住「方法不存在」，于是报
    `adapter.providerRetryPolicy is not a function`。运行时真正会调用的适配器方法恰有 7 个：
    `providerInfo` / `providerRetryPolicy` / `imageRequestPricing` / `listModels` / `resolveModel` / `prepareCall` / `stream`。
-   → 见 `test/contract.test.js`。
+   → 现在没有自动守卫；加一个新的适配器方法之前，先数一遍上面这 7 个是怎么用的。
 
 2. **插件不能按裸模块名 import `@deepseek-ai/*` 核心包。**
    profile 的 `node_modules` 是 pnpm 扁平布局，`@deepseek-ai/` 下只有 `cosmokit` 与 `schemastery`；
    核心包只存在于 `app.asar` 里，**只能经 `ctx` 服务访问**。实测报
    `ERR_MODULE_NOT_FOUND: Cannot find package '@deepseek-ai/dsh-tools'`。
    需要核心能力时的两条正路：① 经 `ctx` 服务；② 库内自足实现（本插件的工具定义就是自己拼的）。
-   → 见 `test/contract.test.js` 的静态检查。
+   → `test/e2e/preflight.mjs` 的静态检查拦这条。
 
 3. **`finish.reason.kind` 只认三个值：`'stop' | 'tool-calls' | 'max-tokens'`。**
    写别的（比如 `'success'` / `'tool-use'`）不会报错，但语义**静默丢失**——宿主拿不到
    「这轮是工具调用」就不会续跑，拿不到 `'max-tokens'` 就不会做截断处理。
-   → 见 `test/anthropic.test.js` 的六种 `stop_reason` 断言。
+   → 端到端探针里的「思考不算输出」那条会顺便验到收尾是否合理；六个 `stop_reason` 的映射
+   在 `src/wire/anthropic.js` 的 `finishKind()` 里，改它时请把六种都过一遍。
 
 4. **`readSse` 在没有 `event:` 行时会填 SSE 的默认事件名 `'message'`，而不是 `undefined`。**
    于是 `translateAnthropicStream` 里 `event.event ?? payload.type` 里的 `??` 是**永远走不到的死代码**
    ——Anthropic 的事件名里没有叫 `message` 的，`event.event` 恒为真。而自建中转只发 `data:`
    是常态（把事件名写在 `payload.type` 里）。现在按 `'message' | undefined` 显式回退。
-   → 见 `test/anthropic.test.js` 里那例「自己造响应、不用 `sseResponse`」的用例：
-   那个辅助函数**总是**会写出一行 `event:`，表达不了「没有事件名」这件事。
+   → 假上游（`test/e2e/mock-upstream.mjs`）的 Anthropic 那条路**只发 `data:` 不发 `event:`**，
+   端到端每轮都在演这件事；守卫就在这里。
 
 5. **失败码要靠 `error.failure` 才能活着走到用户面前，而那个对象少一个字段就整份作废。**
    宿主把适配器抛出的异常转成 `{type:'finish', reason:{kind:'error', failure}}`，转换函数是
@@ -507,8 +512,8 @@ docs/
    `status` 必须是 100..599 的整数，**任何一项不合格都会把整份快照判成 `undefined`**
    （不是忽略那一个字段）。我们原先挂了 `failure` 却漏了 `message`，于是这条路早就在、
    却一直没通。
-   → 见 `src/failure.js`、`src/wire/http-error.js` 与 `test/failure.test.js`
-   （那个文件里第一条用例是宿主算法的**复刻**：抄它的判定顺序，断言我们的错误真能过它）。
+   → 见 `src/failure.js` 与 `src/wire/http-error.js`（那个把宿主算法**复刻**出来、
+   逐条断言我们的错误真能过它的用例原先在 `test/failure.test.js`，随单元测试一起删了）。
 
 ## 独立审查（P7.5）：四个互不通气的审查员
 
@@ -521,11 +526,12 @@ P7 十一个工作包做完之后，**四个独立子代理**分头读了一遍�
 | 十一个族 | `_dsh_research/review/families.md` | 2 严重 + 6 次要 |
 | HTTP/UI/工具面 | `_dsh_research/review/surface.md` | 2 严重 + 7 次要 |
 
-**这一轮修掉的十处**（每处都有回归用例，写在 `test/` 里）：
+**这一轮修掉的十处**（当时每处都配了回归用例；那些用例随单元测试一起删了，
+所以下面这些**现在只有代码里的注释与这份清单记着**，动到相关代码时请对着核）：
 
 1. **额度失败停错了范围**（`src/health.js`）：`MODEL_SCOPED_QUOTA_FAMILIES` 里写的是 `'antigravity'`，而族的 id 是 **`agy`**——集合里那个名字从来不存在，于是「这个模型额度用尽」被当成「这个账号废了」，把整个账号停掉、连带把别的模型也停了。现在集合里是真实族 id，并加了一条不变量用例：集合里的每个名字都必须是 `FAMILIES` 里真的有的 id。
 2. **`?? 兜不住 0`**（`src/families/codex.js`、`src/families/claude.js`）：上游把 `context_window` 回成 `0` 时，`?? 默认值` 放它过去，宿主拿到 `contextWindow: 0` 会判 `INVALID_MODEL_CONTEXT` 并把整个 provider 连坐。改用 `firstPositiveNumber()`。
-3. **回环回调的 state 可以被绕过**（`src/login/loopback.js`）：`result.state !== undefined && result.state !== expected` 这个写法把「回调根本没带 state」当成匹配——本机任何实体都能用 `GET /callback?code=<自己的码>` 塞一个授权码进来。现在是严格相等，并补了 `test/loopback.test.js`（4 例）。
+3. **回环回调的 state 可以被绕过**（`src/login/loopback.js`）：`result.state !== undefined && result.state !== expected` 这个写法把「回调根本没带 state」当成匹配——本机任何实体都能用 `GET /callback?code=<自己的码>` 塞一个授权码进来。现在是严格相等。
 4. **回环数据面只认 `remoteAddress`**（`src/api.js`）：DNS rebinding 下浏览器的请求也来自 `127.0.0.1`，于是 `state` / `remove` / `unfreeze` / `proxy` 对任意网页可达。现在多一道 `Origin` 检查（**没有 Origin 的放行**——`curl` 不该被挡；`Origin: null` 拒绝）。
 5. **零参工具调用会被整条丢弃**（`src/wire/chat-completions.js`）：先发了一个合法的 `tool-call` 块，随后按「一个字都没出」抛 `EMPTY_RESPONSE`。判据改成「有名字也算交付」。
 6. **`response.output_item.done` 不带 `output_index` 时块关不上**（`src/wire/responses.js`）：补开一个空块收尾，不置「已输出」。
@@ -538,35 +544,43 @@ P7 十一个工作包做完之后，**四个独立子代理**分头读了一遍�
 
 ## 测试
 
-```bash
-npm test          # 等价于 node --test "test/*.test.js"
-```
-
-注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
-
-当前：**1063 个用例，1050 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
-要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
+**这个仓库只有端到端测试。** 单元测试与回归测试都删掉了，只留真机链路测试——理由与代价写在
+`AGENTS.md`：「我以为的协议是自洽的」不是证据，而这个插件几乎每一条规矩都是从真机上撞出来的。
 
 ```bash
-BRIDGE_LIVE_AGY=1 node --test test/agy.test.js
+npm test                           # 起假上游 + 起无头真宿主，跑一轮端到端
+node test/e2e/harness.mjs          # 同上，并且把宿主的输出一并转出来（查问题用）
+node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 ```
 
-需要联网、默认跳过的真机用例各有各的环境变量开关：
-`BRIDGE_LIVE_AGY` / `BRIDGE_LIVE_QODER` / `BRIDGE_LIVE_WORKBUDDY` / `BRIDGE_LIVE_COMMANDCODE` /
-`BRIDGE_LIVE_GROK` / `BRIDGE_LIVE_COPILOT` / `BRIDGE_LIVE_TRAE`
-（其中 Qoder / CommandCode / Grok / Copilot / Trae 那几条**本机也跑不了**——没有 PAT、没有账号、没有订阅）。
+一轮 `npm test` 做四件事：
 
-**面板（`src/client.js`）怎么在没有浏览器的情况下测**：仓库里带了一个 60 行的迷你 React
-（`test/mini-react.js`），够撑起 `createElement` / `useState` / `useEffect` / `useCallback` / `useRef`。
-不把真 React 拉成 devDependency 的理由是：那会让 `npm test` 依赖一份**与宿主版本无关**的 React，
-测出来的东西和真实运行环境的关系就说不清了。迷你 React 踩过两个坑，都值得记：
-`useCallback` 依赖没变时**必须返回上一次那个函数**（返回新函数会让 `useEffect(fn, [cb])`
-变成「取数 → setState → 依赖又变 → 再取数」的死循环）；每个用例必须**一棵全新的组件树**
-（共用一棵树会让 hook 状态跨用例泄漏，测出来的绿是假的）。
+1. **四条静态前置检查**（`test/e2e/preflight.mjs`）：源码里不许按裸模块名 import 核心包；
+   `THIRD_PARTY_NOTICES.md` 里登记的每个源文件必须自己注明来源；会写盘的源码只准是
+   `src/families/{grok,minimax}.js`；`docs/host-writes.md` 里那六个不许碰的宿主配置 row id 还在。
+   这些是「一眼能判定、错了后果很贵」的规矩，不搬任何逻辑断言。
+2. 起一个**假上游**（`test/e2e/mock-upstream.mjs`，端口随机）：它是**故意难伺候的**验收台——
+   Anthropic 那条路只发 `data:` 不发 `event:`、不认 `stream_options`、不认 `cache_control`、
+   不认 `Claude Code` 身份块、密钥不对回 401，另有一批专演事故的模型
+   （`claude-mock-hold` 先吐 20 个思考块再报错、`mock-html-page` 回一整页 HTML、
+   `mock-cf-403` 回 403 的 HTML、`mock-429-week` 回带一周 `retry-after` 的 429、
+   `mock-credit` 回「余额不足」）。**不许为了让自己那关过而把它改宽容。**
+3. 起一个**真的无头宿主**（`<exe> <cli.js> --profile e2e`，`DSH_HOME` 指向 `test/e2e/.home/`），
+   插件是按 `link:` 装进去的 ⇒ **改 `src/` 立刻生效，改探针要重跑**。
+4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 19 条检查，结果写进报告文件再由 `npm test` 读回来。
 
-MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的，跑一次就消耗掉一条真实登录态。
-写回路径的验证方式是**拿真的 `auth.json`、只把令牌端点换成 stub**
-（`_dsh_research/mcode-writeback-e2e.mjs` 那种做法），跑完从备份还原。
+要求 Node ≥ 20 与一份 DSH 桌面版（默认 `D:\Program\deepseek harness desktop`，
+可用 `DSH_DESKTOP` / `DSH_HOST_EXE` / `DSH_HOST_CLI` 覆盖）。临时 profile 建在
+`test/e2e/.home/`（已 gitignore）：**第一次要装 200 多个包、半分钟左右**，之后就走缓存。
+
+**加测试 ＝ 加一条检查。** 检查写在探针里（`test/e2e/probe/index.js`），套路固定：
+用 `account_bridge_*` 工具造出需要的账号 → 让池子真的发一次请求 → 断言宿主看见的那份东西
+（chunk 序列、`finish.reason.kind`、`failure.code`、数据面返回的字段）。断言要写在探针里、
+**不要**挪到 `e2e.test.js`——那里只负责把报告翻译成测试结果，一行判断都不要有。
+
+两条老实话：端到端能证明「接上去是对的」，证明不了「我不知道的那条规则有没有被改动」；
+随着单元测试一起删掉的还有 W8 那套翻译层 golden 快照（12 个翻译器的规则面），
+现在只由探针里那几条真机检查（思考不算输出、失败归类、声明式目录）间接守着。
 
 ## 设计要点
 
@@ -625,7 +639,8 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
 
   **「pace 相差一档以内算同档」必须先离散成整数层再排序**：`p < 0.9 × top` 不传递，
   三个各差一档不到的 pace 直接塞进比较器会**绕圈**（a>b>c>a，结果取决于输入顺序）。
-  magpie 的源码注释专门写了这件事；`test/select.test.js` 用四种输入顺序钉住了它。
+  magpie 的源码注释专门写了这件事；`src/select.js` 的 `bandOf()` 就是把它离散成整数层，
+  改它之前请先用四种不同的输入顺序各想一遍。
 - **被限流过的账号会「沉」到后面**（`src/select.js` 的 `sinkOrder`，magpie 的 Sink）。
   一个账号被限流、冷却一结束就又被灌满请求，正是厂商风控会盯上的形状（那条需求来自 magpie
   用户 01huadalang 的实际投诉）。沉过的排在没沉过的后面、**沉得早的排在沉得晚的前面**，
@@ -650,13 +665,13 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   但紧接着的八条并发请求各只花了 780 毫秒、一条都没被拦，**这一点没有解释清楚**：最可能是宿主的
   默认重试拿 `providerRetryAfterMs` 等满一分钟再发（于是「被拦」在调用方眼里变成「慢了一点」，
   而那正是我们想要的效果——把请求摊开，而不是让用户吃到失败），但也不排除那一瞬间池子认的候选不对。
-  把行为钉死的是单测 `test/pool.test.js` 的
-  `gate: a one-a-minute account is paced by the pool, not merely retried`（两个账号各 1 次/50 毫秒、
-  八条并发，断言发出的时刻被摊开，且同一个账号不会在一个窗口里发两次）。
+  把行为钉死的是当时的单测（两个账号各 1 次/50 毫秒、八条并发，断言发出的时刻被摊开，
+  且同一个账号不会在一个窗口里发两次）——**那份测试随单元测试一起删了，这条现在是未解之谜**；
+  要复查就在探针里加一条同级检查，别只靠推理。
 - **选号看的额度是后台尽力而为读来的**：池子装配时顺手起一次 `family.quota()`，每账号 5 分钟
   TTL、失败后隔 1 分钟才再试，**装配与选择都不为它等待**。上游返回 `undefined`（什么都没说）
   时**不写快照**——保持「未知」才能继续走 `learns`；写成 0 就等于替上游宣布「你没额度了」。
-  `test/select-wiring.test.js` 里有一条用例让额度查询永不落地，并断言请求照样跑完。
+  （「额度查询不落地时请求照样跑完」这条原先有条用例守着，那份测试已随单元测试删掉。）
 - **会话粘性：粘不粘由上游「到底从缓存里读了多少」说了算**（`src/affinity.js`，语义借自 magpie
   的 `internal/gateway/affinity.go`，见 `THIRD_PARTY_NOTICES.md`）。旧写法是「同一段会话无条件
   粘住」，它有个说不出口的假定：**粘住就一定省了钱**。上游若压根没缓存这一轮（换了模型、
@@ -722,8 +737,9 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   `wire/http-error.js` 的 `mapStatus()` 定 `error.code`——那是**宿主与用户看得见的**码；
   `health.js` 的 `classifyFailure()` 定**停哪个号、停多久**。各写一份就会漂移，而且漂移的
   表现正是最难查的那一类。真机验收里就抓到过一次：Zhipu 的「余额不足或无可用资源包，请充值」
-  让账号被按「欠费」冻了半小时，屏幕上却写着 `RATE_LIMIT`。现在 `test/http-error.test.js` 里
-  有一条不变量用例，逐条比对 `error.code` 与冷却裁决必须永远一致。
+  让账号被按「欠费」冻了半小时，屏幕上却写着 `RATE_LIMIT`。当时有一条不变量用例逐条比对
+  `error.code` 与冷却裁决必须永远一致（那份用例随单元测试一起删了；
+  现在由端到端探针里两条 429 检查——`mock-credit` 与 `mock-429-week`——守着同一件事）。
 - **导入来的凭据默认只读**：刷新出的新令牌不回写对方的文件，避免和 CLI 互相踩。
   唯一的例外是 `minimax`——它的刷新令牌是一次性的、而令牌文件是桌面端与本插件共用的，
   不写回就等于把用户踢下线（见上面那一节）。加新族时**默认按只读处理**，
@@ -741,8 +757,8 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
 
   唯一的例外写在代码注释里：`src/discover.js` 的 `exists()` **故意**把「不知道」说成「不在」——
   它只用来给未实现族挂一句提示，不流向写盘，少说一句比对着读不动的路径宣称「你装过」好。
-  **别的地方不许照抄这个取舍。** 回归测试在 `test/unknown-not-empty.test.js`（另加
-  `test/minimax.test.js`、`test/grok.test.js` 里的六条），每条都验证过「改回旧实现就会失败」。
+  **别的地方不许照抄这个取舍。** 这条原先有九条用例守着（含 minimax 与 grok 各几例，
+  每条都验证过「改回旧实现就会失败」），现在随单元测试一起删了——**改这四个地方之前请回来读这张表**。
 - **翻译层不再静默丢东西**（`src/wire/diagnostics.js`）。协议之间做转换，总有表达不了的东西；
   过去的做法是 `default: break`——**连「丢了什么」都不说**。代价不是理论上的：`pause_turn`
   落进 `default` 让「被服务端工具暂停的一轮」看起来像正常说完了；`output_index ?? 0`
@@ -786,24 +802,19 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
 
   这条链子上有一个**测试脚手架抓不到**的坑：`src/pool.js` 递给族的那一大坨 options 是
   **逐字段拼出来的，不是 `...options` 展开的**，所以 `onDiagnostic` 必须显式写进去。漏写的
-  后果是「翻译层会报告、单测全绿、文档说它记下来了，而生产路径上一个人都没听见」——
-  比不报告更糟。现在有两个守卫盯着：`test/pool.test.js` 验账本真的收到了、说的是哪句话、
-  下一轮是不是干净的；`test/contract.test.js` **静态扫描 `src/families/*.js`**，凡是调用了
-  接受 `onDiagnostic` 的翻译函数却没传的，直接失败（这条守卫写出来时就抓到了 copilot 一处真实漏写）。
-- **golden 快照**（`test/golden/`）。五条翻译线 × 请求/流两个方向，逐字节钉住。
-  单测能保住「我知道的那条规则」，保不住「我不知道的那条也被改动了」——
-  W4/W8 抓到的四条缺陷**全部**属于后者（`pause_turn`、`output_index ?? 0`、静默发出的
-  `stream_options`、收尾把流过的思考换成空块）。用法：
-
-  ```bash
-  node --test test/golden.test.js                  # 比对
-  UPDATE_GOLDEN=1 node --test test/golden.test.js  # 重生成（重生成后读一遍 diff 再提交）
-  ```
-
-  快照红了先看 diff，**不许**直接 `UPDATE_GOLDEN=1` 抹平；重生成必须把新文件一起提交，
-  否则下一个人拿到的是「默认通过」的假绿。`normalise()` 只兜底长 hex 与 base64——
-  翻译层是纯函数，真归一化掉了一个值说明有东西在凭空造 id，那是要先修代码的。
-  用例表与磁盘上的快照有一一对应的守卫（删用例留下僵尸文件会红）。
+  后果是「翻译层会报告、测试全绿、文档说它记下来了，而生产路径上一个人都没听见」——
+  比不报告更糟。当时有两个守卫盯着（池子侧的账本用例、以及静态扫描 `src/families/*.js`
+  里「调用了接受 `onDiagnostic` 的翻译函数却没传」的检查），**都随单元测试删掉了**；
+  这条链子现在由端到端探针的「诊断面可用」间接看着，改 `src/pool.js` 那段 options 拼接时请特别当心。
+- **翻译层丢东西时的账本留最近 8 次**：`src/pool.js` 的 `#lost` 是个 8 格环，
+  `/pool lost` 报的是**最近一次真的丢了东西的那一本**（不是最后一次请求的那一本——agent 一轮里
+  最后一次常常是回传工具结果的干净请求）。这条正是真机验收抓出来的：账本原先只留最后一次，
+  于是事后去查永远看到「什么都没丢」。
+- **golden 快照曾经存在，现在没有了**（原 `test/golden/`，五条翻译线 × 请求/流两个方向逐字节钉住）。
+  W4/W8 抓到的四条缺陷**全部**属于「我不知道的那条规则也被改动了」这一类，
+  而那正是当时用快照的理由——**删掉它是这次「只留端到端」付出的最实的一笔代价**。
+  端到端能证明接上去是对的，证明不了这个。要重建的话，最低成本的做法是在假上游里加一个模型，
+  把某条翻译线上的请求/流原样回显出来，再由探针比对。
 
 ## 族的状态与取舍
 
@@ -814,12 +825,12 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
 | `agy` | `acct-agy` | ✅ 真机验证（驱动本机 `agy` CLI，14 个模型，真机推理通过） |
 | `minimax` | `acct-minimax` | ✅ 真机推理通过 |
 | `generic` | `acct-generic` | ✅ 真机验证（对着一个假端点两条方言各跑通一次） |
-| `qoder` | `acct-qoder` | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
-| `workbuddy` | `acct-workbuddy` | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文，解不开） |
-| `commandcode` | `acct-commandcode` | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
-| `grok` | `acct-grok` | ⚠️ 单测通过，**真机未验**（本机没装 Grok CLI，也没有订阅） |
-| `copilot` | `acct-copilot` | ⚠️ 单测通过，**真机零验证**（本机没有 Copilot 订阅） |
-| `trae` | `acct-trae` | ⚠️ 单测通过，**真机零验证**（本机没有任何 Trae 账号） |
+| `qoder` | `acct-qoder` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Qoder、没有 PAT） |
+| `workbuddy` | `acct-workbuddy` | ⚠️ 端到端验到 route 与元数据；**真机仅验到第一条**（本机凭据是 5.6 的密文，解不开） |
+| `commandcode` | `acct-commandcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
+| `grok` | `acct-grok` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Grok CLI，也没有订阅） |
+| `copilot` | `acct-copilot` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有 Copilot 订阅） |
+| `trae` | `acct-trae` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有任何 Trae 账号） |
 
 **明确不做的族，以及为什么**：
 

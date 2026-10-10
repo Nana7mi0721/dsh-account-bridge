@@ -35,7 +35,7 @@
  *    `@deepseek-ai/dsh-storage` + `storage-json` + `storage-domain` 挂在每个 profile 的
  *    `dsh-base` 里（根目录 `~/.dsh/storages`），我们不该在 `~/.dsh` 下面另开一个文件。
  *    **但不能 import `@deepseek-ai/dsh-storage-domain`**——插件按裸模块名 import 核心包会
- *    `ERR_MODULE_NOT_FOUND`（真机实测，见 `test/contract.test.js`），所以 spec 是手工拼的：
+ *    `ERR_MODULE_NOT_FOUND`（真机实测：profile 的 `node_modules` 里没有这些包），所以 spec 是手工拼的：
  *    `open()` 只读 `name` / `version` / `tables[].valueSchema` / `global` / `invalidRecords` /
  *    `layout`，`defineDomain` 干的事只是「模块加载时校验一遍」，而我们自己校验。
  * @module dsh-account-bridge/affinity

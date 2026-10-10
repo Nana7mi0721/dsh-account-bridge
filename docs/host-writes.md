@@ -46,7 +46,8 @@ magpie（MIT，用户可能同时装着）是原生支持 DSH 的，它写的就
 
 ## 这条纪律怎么被钉住的
 
-- `test/host-writes.test.js`：静态扫描 `src/**/*.js`，**会写盘的文件必须正好是那两个厂商客户端
+- `test/e2e/preflight.mjs` 里那条同级检查（原先在 `test/host-writes.test.js`，
+  随单元测试一起搬了过来）：静态扫描 `src/**/*.js`，**会写盘的文件必须正好是那两个厂商客户端
   文件**；它们以及其余源码里都不许出现 `cordis.patch.yml` / `cordis.yml` / `.credentials.yaml`
   的写操作；这份文档必须还在，且**那 6 个 row id 与四条红线的标题必须逐字还在**（防止文档被
   慢慢改空，而代码那边以为规矩还有效）。

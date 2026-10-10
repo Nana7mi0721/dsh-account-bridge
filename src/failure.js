@@ -17,7 +17,7 @@
  * route on this, never by parsing `message`."*（`:128`）——不占这条，就等于让下游去猜字符串。
  *
  * 我们**不能** import `@deepseek-ai/dsh-llm`（插件里裸模块名解析不到，这是本项目的一条硬契约，
- * 由 `test/contract.test.js` 静态扫描守着）。但也不需要：只要在错误上挂一个
+ * 由 `test/e2e/preflight.mjs` 的静态扫描守着）。但也不需要：只要在错误上挂一个
  * `error.failure = {message, code, …}`，并且 `failure.code === error.code`，宿主的第一个分支就成立。
  *
  * `failureSnapshot()`（`:439-462`）校验得很死，任何一个字段不合格都会**把整份快照判成

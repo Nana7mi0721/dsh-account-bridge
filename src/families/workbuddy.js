@@ -432,7 +432,7 @@ export const workbuddyFamily = {
    * 纯 HTTPS，不需要桌面端在线。**返回的是新的 `auth` 对象**（契约 §3.2），
    * 池子会浅合并进原记录，所以会变的键（`accessToken` / `refreshToken` /
    * `expiresAt` / `domain`）必须显式带上；不变的键一起带回来是为了让这个函数
-   * 的返回值自洽（单测直接断言它）。
+   * 的返回值自洽（别指望调用方替你补）。
    *
    * 池子传进来的 `signal` **恒为 `undefined`**，所以不能假设它存在。
    */
@@ -597,16 +597,16 @@ export const workbuddyFamily = {
    * `tool_choice` 字符串化），国际版再过一层 `prepareInternationalChatBody`
    * （补 system 头、删 `reasoning_effort: 'off'`）。
    *
-   * `stream()` 里**只发一次上游请求**：契约 §5 与 `test/streaming-flag.test.js`
-   * 都要求这一次是流式的，中间插一个探测请求会把「只有最后一次是流式」打破。
+   * `stream()` 里**只发一次上游请求**：契约 §5 要求这一次是流式的
+   * （原先有一条用例断言「最后一次 `ctx.fetch` 必须是流式」，已随单元测试删除），
+   * 中间插一个探测请求会把这件事打破。
    */
   async *stream(ctx, options) {
     const { payload, model, messages = [], tools = [], effort, system, maxTokens, signal } = options ?? {}
     const auth = payload?.auth ?? {}
     // 令牌缺失时**照样发这一次请求**，让上游给 401，而不是在这里先抛。
     // 理由有两条：一是别的族都是这么做的（`generic.js` 直接拼 `Bearer ${apiKey}`），
-    // 二是 `test/streaming-flag.test.js` 的断言是「最后一次调用必须是流式」——
-    // 在这里提前抛就等于一次调用都没有，那条测试会变成假失败。
+    // 二是「这一次调用是流式的」本身就是要验的东西——提前抛等于一次调用都没有。
     const region = regionOfAuth(auth)
 
     const systemText = toChatSystem(system, messages)

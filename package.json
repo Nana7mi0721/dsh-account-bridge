@@ -15,7 +15,7 @@
     "./package.json": "./package.json"
   },
   "scripts": {
-    "test": "node --test \"test/*.test.js\""
+    "test": "node --test \"test/**/*.test.js\""
   },
   "files": [
     "src",
