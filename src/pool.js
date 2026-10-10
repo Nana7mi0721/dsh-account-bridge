@@ -5,6 +5,8 @@
  * 1. **流式 failover 只在「一个字都没吐出去」时做**。block-start 不算输出，
  *    block-end 带 text/id/arguments 才算，usage/finish 不算。为了能做到这件事，
  *    首个实质内容之前的所有 chunk 都要先缓冲。
+ *    **但「思考」也不算输出**，且缓冲不能无限等下去——三个上限见 `HOLD_LONGEST_MS`
+ *    那一组的注释。
  * 2. **粘性会话是刚需**：同一个会话尽量钉在同一个账号上，否则上游的 prompt cache
  *    每轮都失效。TTL + 上限，auth 变更时清空。
  * 3. **选择器是各账号目录的并集**：多个账号都有的模型可以互相 failover，
@@ -23,6 +25,81 @@ const CATALOG_TTL_MS = 10 * 60_000
 const STICKY_LIMIT = 1000
 const STICKY_TTL_MS = 30 * 60_000
 
+/*
+ * 换号窗口的三个上限（语义照 magpie `internal/gateway/fallback.go` 的
+ * `holdLongest` / `holdMost` / `holdThinking`，MIT，见 THIRD_PARTY_NOTICES.md）。
+ *
+ * 要解决的问题：Claude 会在想了 10–25 秒之后用安全策略**拒绝整轮**（issue #248
+ * 的现场）。如果我们一看到 `reasoning-delta` 就认为「已经输出了、不能再换号了」，
+ * 用户吃到的就是那条拒绝，而**下一个账号从来没被问过**。所以「思考」不算输出。
+ *
+ * 但也不能无限憋着：
+ * - 一个 chunk 都没有时最多等 `HOLD_LONGEST_MS`；
+ * - 手里**只有思考**、且这家会在思考之后拒绝整轮时，给到 `HOLD_THINKING_MS`；
+ * - 手里只有思考、而这家不会因为思考就拒绝（GLM / DeepSeek / MiniMax…）时**立刻放行**——
+ *   magpie 的注释记着实际后果：憋着会让这些家的思考在正文开始时**一次性吐出来**；
+ * - 缓冲超过 `HOLD_MOST_BYTES` 就先放行，免得一个疯狂输出的上游把内存吃光。
+ *
+ * **到期一律「原样放行」（commit + 把缓冲按原顺序吐出去），不是丢弃。** 一个字都没
+ * 吐出去的时候抛 `EMPTY_RESPONSE` 换号（那条路依然完好）；放过之后就不能再换号了。
+ *
+ * **这里没有「保活」**：不是忘写。magpie 要发保活是因为它自己写 HTTP 响应头，
+ * 而 Codex 等客户端会等流上的下一个事件 300 秒。我们是**进程内的 adapter**，
+ * 上面没有一层可以写 SSE 注释的地方，宿主自己也**没有流空闲超时**（`dsh-llm` 全文
+ * grep `idle|stall|keepalive` 零命中）——没有任何东西在给我们计时。
+ */
+const HOLD_LONGEST_MS = 15_000
+const HOLD_THINKING_MS = 4 * 60_000
+const HOLD_MOST_BYTES = 1 << 20
+
+/**
+ * 三个上限的默认值，可在构造适配器时覆盖（慢上游可以把窗口调长）。
+ * @type {{longestMs: number, thinkingMs: number, mostBytes: number}}
+ */
+export const HOLD_DEFAULTS = {
+  longestMs: HOLD_LONGEST_MS,
+  thinkingMs: HOLD_THINKING_MS,
+  mostBytes: HOLD_MOST_BYTES,
+}
+
+/** 只有一个 `setTimeout` 的「到期」信号；拿到结果后必须 `cancel()`。 */
+function deadline(ms) {
+  let timer
+  const promise = new Promise((resolve) => {
+    timer = setTimeout(() => resolve(DEADLINE), ms)
+    // 忘掉 cancel 也不该让进程吊着（测试里最容易踩）。
+    if (typeof timer.unref === 'function') timer.unref()
+  })
+  return { promise, cancel: () => clearTimeout(timer) }
+}
+const DEADLINE = Symbol('hold deadline')
+
+/**
+ * 这家厂商会不会「想完之后拒绝整轮」——决定「手里只有思考」时给不给它时间。
+ *
+ * 判据照 magpie 的 `refusesAfterThinking`：Claude 系与 GPT 系 true，模型名去掉最后
+ * 一段 `/` 之后以 `gemini` 开头 true，**其余 false**。别家不能憋（magpie 的注释：
+ * 憋着会让 GLM 这类家的思考在正文开始时一次性吐出来），所以我们宁可按模型名判、
+ * 也不按族一刀切——`generic` / `copilot` / `trae` 一个族里什么模型都有。
+ *
+ * 族可以在自己身上覆盖它（`family.refusesAfterThinking?.(model)`）。
+ *
+ * @param {{id?: string, refusesAfterThinking?: (model: string) => boolean}} family
+ * @param {string} model
+ * @returns {boolean}
+ */
+export function refusesAfterThinking(family, model) {
+  if (typeof family?.refusesAfterThinking === 'function') return Boolean(family.refusesAfterThinking(model))
+  const name = String(model ?? '').toLowerCase()
+  // `provider/model` 两段形态（generic 族常见）只看最后一段，与 magpie 一致。
+  const tail = name.includes('/') ? name.slice(name.lastIndexOf('/') + 1) : name
+  if (tail.startsWith('gemini') || tail.startsWith('claude') || tail.startsWith('gpt')) return true
+  // `o1` / `o3-mini` / `o4` 这些也是 GPT 系，但它们不以 `gpt` 开头。
+  if (/^o[1-9](?:-|$)/.test(tail)) return true
+  // 模型名认不出来时退回族：这两族只有一家的模型，不会判错。
+  return family?.id === 'codex' || family?.id === 'claude'
+}
+
 /** 账号池适配器（鸭子类型满足 DSH 的 LlmAdapter 契约，无需继承）。 */
 export class AccountBridgeAdapter {
   #ctx
@@ -34,13 +111,15 @@ export class AccountBridgeAdapter {
   #pools = new Map()
   #sticky = new Map()
   #inflightRefresh = new Map()
+  #hold
 
-  constructor({ ctx, store, health, families, log }) {
+  constructor({ ctx, store, health, families, log, hold }) {
     this.#ctx = ctx
     this.#store = store
     this.#health = health
     this.#families = families
     this.#log = log
+    this.#hold = { ...HOLD_DEFAULTS, ...(hold ?? {}) }
   }
 
   /** 本适配器占用的 provider route 列表。 */
@@ -302,23 +381,62 @@ export class AccountBridgeAdapter {
     void now
   }
 
-  /** 判定一个 chunk 算不算「实质输出」。 */
-  static isMeaningful(chunk) {
+  /**
+   * 判定一个 chunk 是不是**正文**（text / tool-call）。
+   *
+   * 出现正文就**必须立刻提交**：调用方已经看到了内容，换号重放会把它看两遍。
+   * `block-start` / `usage` / `finish` 都不算——它们不携带内容。
+   */
+  static isContent(chunk) {
     if (!chunk || typeof chunk !== 'object') return false
     if (chunk.type === 'block-end') {
       const block = chunk.block
       if (!block) return false
-      if (block.type === 'text' || block.type === 'reasoning') return typeof block.text === 'string' && block.text.length > 0
+      if (block.type === 'text') return typeof block.text === 'string' && block.text.length > 0
       if (block.type === 'tool-call') return Boolean(block.id || block.name || block.arguments)
       return false
     }
-    if (chunk.type === 'text-delta' || chunk.type === 'reasoning-delta') {
-      return typeof chunk.text === 'string' && chunk.text.length > 0
-    }
+    if (chunk.type === 'text-delta') return typeof chunk.text === 'string' && chunk.text.length > 0
     if (chunk.type === 'tool-call-delta') {
       return typeof chunk.argumentsDelta === 'string' && chunk.argumentsDelta.length > 0
     }
     return false
+  }
+
+  /**
+   * 判定一个 chunk 是不是**思考**（reasoning）。思考**不算输出**。
+   *
+   * 理由见 `HOLD_LONGEST_MS` 那一组：Claude 会在想了 10–25 秒之后拒绝整轮，把
+   * 「已经开始思考」当成「已经输出了」等于让用户直接吃到那条拒绝。
+   */
+  static isThinking(chunk) {
+    if (!chunk || typeof chunk !== 'object') return false
+    if (chunk.type === 'reasoning-delta') return typeof chunk.text === 'string' && chunk.text.length > 0
+    if (chunk.type === 'block-end') {
+      const block = chunk.block
+      return Boolean(block && block.type === 'reasoning' && typeof block.text === 'string' && block.text.length > 0)
+    }
+    return false
+  }
+
+  /** 思考或正文：这一轮确实产出了东西。 */
+  static isMeaningful(chunk) {
+    return AccountBridgeAdapter.isContent(chunk) || AccountBridgeAdapter.isThinking(chunk)
+  }
+
+  /**
+   * 缓冲里这些 chunk 大概占多少字节（`HOLD_MOST_BYTES` 用）。
+   *
+   * 只数我们自己持有的**文本**，不算对象开销——目的是「一个疯狂输出的上游别把内存
+   * 吃光」，不是精确记账。
+   */
+  static chunkBytes(chunk) {
+    if (!chunk || typeof chunk !== 'object') return 0
+    let total = 0
+    for (const value of [chunk.text, chunk.argumentsDelta, chunk.block?.text, chunk.block?.arguments]) {
+      if (typeof value === 'string') total += value.length
+    }
+    return total
   }
 
   /**
@@ -358,8 +476,30 @@ export class AccountBridgeAdapter {
     for (const [index, candidate] of ordered.entries()) {
       const accountId = candidate.account.id
       const pending = []
+      let pendingBytes = 0
+      let bufferedSince = 0
+      let thinkingSince
+      let deadlineAt = 0
       let committed = false
       let produced = false
+      // 这一轮会不会「想完之后拒绝整轮」：决定「手里只有思考」时给不给它时间。
+      const refusesThinking = refusesAfterThinking(family, model)
+      /**
+       * 把缓冲里的东西**原样**交出去，并从此不再允许换号。
+       *
+       * 返回要 yield 的副本（调用方负责 yield），顺序与到达顺序一致——「思考在前、
+       * 正文在后」的顺序是上游给的，改了就错。
+       */
+      const commitHold = () => {
+        if (committed) return []
+        committed = true
+        produced = true
+        if (stickyKey) this.#rememberSticky(stickyKey, accountId, Date.now())
+        const buffered = pending.slice()
+        pending.length = 0
+        pendingBytes = 0
+        return buffered
+      }
       try {
         const payload = await this.#freshPayload(family, candidate.account)
         const iterator = family
@@ -379,23 +519,60 @@ export class AccountBridgeAdapter {
           })
           [Symbol.asyncIterator]()
 
+        let next = iterator.next()
         while (true) {
-          const { value, done } = await iterator.next()
-          if (done) break
-          if (!value) continue
-          if (!committed) {
-            if (!AccountBridgeAdapter.isMeaningful(value)) {
-              pending.push(value)
+          let result
+          if (committed || pending.length === 0) {
+            // 没有东西攒着就没有「换号窗口」可等，直接拿下一块。
+            result = await next
+          } else {
+            const wait = deadline(Math.max(0, deadlineAt - Date.now()))
+            try {
+              result = await Promise.race([next, wait.promise])
+            } finally {
+              wait.cancel()
+            }
+            if (result === DEADLINE) {
+              // 到期：**原样放行**手里攒着的（不是丢弃）。放过之后就不能再换号了，
+              // 因为调用方已经在屏幕上看见了这些块。
+              for (const buffered of commitHold()) yield buffered
               continue
             }
-            // 第一个实质 chunk 出现：从现在起不能再换号了
-            committed = true
-            produced = true
-            if (stickyKey) this.#rememberSticky(stickyKey, accountId, Date.now())
-            for (const buffered of pending) yield buffered
-            pending.length = 0
           }
-          yield value
+          const { value, done } = result
+          if (done) break
+          // 必须在下面任何 `continue` 之前就把下一次拉起来，否则 `await next` 会
+          // 反复拿到同一个已解决的结果，转成死循环。
+          next = iterator.next()
+          if (!value) continue
+          if (committed) {
+            yield value
+            continue
+          }
+          // 正文：立刻提交，之后不许换号。
+          if (AccountBridgeAdapter.isContent(value)) {
+            for (const buffered of commitHold()) yield buffered
+            yield value
+            continue
+          }
+          // 只有思考、而这家不会因为思考就拒绝整轮 ⇒ 立刻放行。
+          // 憋着会让这些家的思考在正文开始时一次性吐出来（magpie #248 的现场）。
+          if (AccountBridgeAdapter.isThinking(value) && !refusesThinking) {
+            for (const buffered of commitHold()) yield buffered
+            yield value
+            continue
+          }
+
+          if (pending.length === 0) bufferedSince = Date.now()
+          if (thinkingSince === undefined && AccountBridgeAdapter.isThinking(value)) thinkingSince = Date.now()
+          pending.push(value)
+          pendingBytes += AccountBridgeAdapter.chunkBytes(value)
+          // 只有思考时才给 4 分钟；其余情况等的是「第一段内容」，也就是 15 秒。
+          deadlineAt = thinkingSince === undefined ? bufferedSince + this.#hold.longestMs : thinkingSince + this.#hold.thinkingMs
+          if (pendingBytes >= this.#hold.mostBytes) {
+            // 一个疯狂输出的上游别把内存吃光：到量就放行。
+            for (const buffered of commitHold()) yield buffered
+          }
         }
 
         if (!produced) {

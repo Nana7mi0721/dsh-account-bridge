@@ -56,6 +56,13 @@ const DEFAULTS = {
    * 不想让插件在启动路径上派生子进程的人可以关。
    */
   discoverOnStartup: true,
+  /**
+   * 换号窗口的三个上限，见 `src/pool.js` 里 `HOLD_DEFAULTS` 那一组的注释。
+   * 一般不用动；上游特别慢（首字节要等 20 秒以上）时把 `holdLongestMs` 调长即可。
+   */
+  holdLongestMs: undefined,
+  holdThinkingMs: undefined,
+  holdMostBytes: undefined,
 }
 
 /** 取一个可能尚未就绪的服务。 */
@@ -101,6 +108,12 @@ export function apply(ctx, config) {
     health,
     families,
     log,
+    hold: {
+      // 任何一个没配就整组回落默认值——只调一个不等于把另两个清零。
+      ...(settings.holdLongestMs === undefined ? {} : { longestMs: settings.holdLongestMs }),
+      ...(settings.holdThinkingMs === undefined ? {} : { thinkingMs: settings.holdThinkingMs }),
+      ...(settings.holdMostBytes === undefined ? {} : { mostBytes: settings.holdMostBytes }),
+    },
   })
 
   /**
