@@ -314,3 +314,20 @@ test('runs one real turn through the CLI', { skip: process.env.BRIDGE_LIVE_AGY !
   const usage = chunks.find((chunk) => chunk.type === 'usage')
   assert.ok(usage.usage.inputTokens > 20_000)
 })
+
+test('问不到目录 ≠ 空目录：CLI 报错时 listModels 必须抛，而不是回 []', async () => {
+  // 用真 node 当 `agy`：`node models` 会以非 0 退出（找不到这个模块），正好演「问不出来」。
+  // 修复前 `probe.unknown` 不存在，这一路会 `signedIn:false` → `listModels` 回 `[]`，
+  // 池子把这份**假空目录**缓存十分钟，面板于是说「没有账号提供 X」。
+  const ctx = { config: { agyBin: process.execPath } }
+  await assert.rejects(agyFamily.listModels(ctx, {}, undefined), (error) => error.code === 'TRANSPORT')
+})
+
+test('问不到就照实说，不谎称「未登录」', async () => {
+  const ctx = { config: { agyBin: process.execPath } }
+  const rows = await agyFamily.discover(ctx)
+  assert.equal(rows.length, 1)
+  assert.equal(rows[0].importable, false)
+  assert.match(rows[0].reason, /没问出登录状态/)
+  assert.doesNotMatch(rows[0].reason, /还没有登录/)
+})

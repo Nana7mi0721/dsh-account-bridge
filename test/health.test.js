@@ -17,6 +17,7 @@ import {
   LONGEST_RATE_REST_MS,
   LONGEST_RETRY_MS,
   LONGEST_WAIT_MS,
+  MODEL_SCOPED_QUOTA_FAMILIES,
   REST_FORGET_MS,
   classifyFailure,
   failureWords,
@@ -252,4 +253,23 @@ test('the first failure of each kind waits the documented time', () => {
     const verdict = classifyFailure(error, family)
     assert.equal(table.record('codex', `codex-${expected}`, 'm', verdict, 0), expected, error.code)
   }
+})
+
+test('every model-scoped family name is a real family id', async () => {
+  // 这条是 review 抓到的真 bug 的回归：集合里写的是显示名的一部分 `'antigravity'`，
+  // 而族 id 是 `'agy'` ⇒ 那条「额度按模型分线」的规则**静默失效**，Antigravity 的
+  // 额度用尽会把整账号所有模型一起停 15 分钟。名字写错不报错，只能靠这条盯着。
+  const { FAMILIES } = await import('../src/families/registry.js')
+  const ids = new Set(FAMILIES.map((family) => family.id))
+  for (const name of MODEL_SCOPED_QUOTA_FAMILIES) {
+    assert.ok(ids.has(name), `MODEL_SCOPED_QUOTA_FAMILIES has "${name}", which is not a family id`)
+  }
+})
+
+test('a quota failure on a model-scoped family rests only that model', () => {
+  const verdict = classifyFailure({ code: 'QUOTA', message: 'agy: HTTP 429 quota exceeded' }, 'agy')
+  assert.equal(verdict.reason, 'QUOTA')
+  assert.equal(verdict.scope, 'member')
+  // 对照：不是按模型分线的族（generic）停整个账号。
+  assert.equal(classifyFailure({ code: 'QUOTA', message: 'g: HTTP 429 quota exceeded' }, 'generic').scope, 'account')
 })

@@ -383,8 +383,17 @@ export async function* translateChatStream(response, { signal, onDiagnostic } = 
   blocks.sort((left, right) => left[0] - right[0])
   for (const [index, block] of blocks) yield { type: 'block-end', index, block }
 
+  // 「有没有交付东西」的判据要跟上面**真的发出去的块**一致，而上面无条件为每个工具槽
+  // 发了一个块（零参工具调用的 `arguments` 被补成 `'{}'`）。原来这里只认
+  // `slot.json.length > 0`，于是「一个零参工具调用」先老老实实发完合法的 tool-call 块，
+  // 紧接着被判成空响应抛 EMPTY_RESPONSE ⇒ 已经交付的工具轮被记成失败、换号、还罚 60 秒。
+  // 有名字就算交付（没名字的空壳不算，那种确实是垃圾）。
   const producedContent =
-    text.length > 0 || reasoning.length > 0 || [...toolSlots.values()].some((slot) => slot.json.length > 0)
+    text.length > 0 ||
+    reasoning.length > 0 ||
+    [...toolSlots.values()].some(
+      (slot) => slot.json.length > 0 || (typeof slot.name === 'string' && slot.name.length > 0),
+    )
   if (!producedContent) {
     const error = new Error('chat-completions: the response completed without any content block')
     error.code = 'EMPTY_RESPONSE'

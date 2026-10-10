@@ -638,7 +638,13 @@ export async function writeBackAuth(next, payload = {}) {
   // 走的就是第二道。
   const before = fileHashByPath.get(path)
   if (before !== undefined) {
-    if (before !== hashDoc(doc)) return { ok: false, reason: 'stale' }
+    // **两道 CAS 的基准必须是同一个东西。** `rememberHash()` 记的是**磁盘原文**的
+    // sha256（`:599`/`:602` 与写完之后的 `:663` 都是），所以这里也必须拿刚读到的原文比。
+    // 原来这里比的是 `JSON.stringify(doc, null, 2)`——只要用户的 auth.json 不是「两空格
+    // 缩进 + 结尾换行」，第一道就**每次都判 stale**，于是写回被静默跳过：上游轮换
+    // refresh token 之后本机 CLI 还捏着旧令牌，用户下次跑 `grok` 被要求重新登录，
+    // 而失败原因被记成「别的进程改过文件」，排障方向完全是错的。
+    if (before !== sha256(text)) return { ok: false, reason: 'stale' }
   } else {
     const onDisk = pickString(doc[slot], ['refresh_token', 'refresh'])
     const ours = typeof payload.auth?.refresh === 'string' && payload.auth.refresh.length > 0 ? payload.auth.refresh : undefined
@@ -693,10 +699,6 @@ async function atomicWrite(path, text) {
  */
 function rememberHash(path, text) {
   fileHashByPath.set(path, sha256(text))
-}
-
-function hashDoc(doc) {
-  return sha256(`${JSON.stringify(doc, null, 2)}\n`)
 }
 
 function sha256(text) {

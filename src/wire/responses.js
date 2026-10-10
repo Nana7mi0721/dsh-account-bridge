@@ -368,6 +368,23 @@ export async function* translateResponsesStream(response, options = {}) {
           yield* begin(index, blockType)
           noteReplay(replaySlots, index, blockType, item)
           yield { type: 'block-end', index, block }
+        } else if (started.has(index)) {
+          // **块必须配平。** 上游只给了加密的思考内容、而 replay 关着（默认）时，
+          // `blockFromItem` 什么都不返回；上面的 `output_item.added` 却已经开过块了。
+          // 只 `open.delete(index)` 会让这个 block-start 永远悬着，宿主见状把整条流判失败
+          // （`finished with 1 open block(s)`），用户看到的是这一轮一个字都没有。
+          // 这里补一个空块把它关掉——**但不置 `sawOutput`**：「只有一段加密思考」仍然是
+          // 没有可交付的内容，该由下面那条 EMPTY_RESPONSE 规则去判，不能在这里替它决定。
+          const kind =
+            entry?.blockType === 'tool-call' ? 'tool-call' : entry?.blockType === 'reasoning' ? 'reasoning' : 'text'
+          yield {
+            type: 'block-end',
+            index,
+            block:
+              kind === 'tool-call'
+                ? { type: 'tool-call', id: entry?.callId, name: entry?.name ?? '', arguments: '' }
+                : { type: kind, text: streamedText.get(index) ?? '' },
+          }
         }
         open.delete(index)
         if (typeof item.id === 'string') indexByItemId.delete(item.id)

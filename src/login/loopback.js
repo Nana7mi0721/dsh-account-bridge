@@ -112,8 +112,20 @@ export async function startLoopback(options = {}) {
     ...onReadyInfo,
     waitForCode: async (expectedState) => {
       const result = await codePromise
-      if (expectedState !== undefined && result.state !== undefined && result.state !== expectedState) {
-        throw new Error('authorization callback state mismatch')
+      // 严格相等：**回调没带 state 也算不匹配**。
+      //
+      // 原来这里写的是 `result.state !== undefined && result.state !== expectedState`，
+      // 那个多出来的判断把「回调压根没带 state」——最可疑的那种情况——判成了通过。
+      // 回调路由（见上面 `handle`）不校验任何头部，本机任意实体都能
+      // `GET /callback?code=<攻击者自己的授权码>`，不带 state 就能把它的令牌写进受害者
+      // 的账号池。OAuth 的 state 本来就是为这件事存在的（RFC 6749 §10.12），
+      // 而上游一定会把它回显回来 ⇒ 缺了就拒绝，没有兼容性代价。
+      if (expectedState !== undefined && result.state !== expectedState) {
+        throw new Error(
+          result.state === undefined
+            ? 'authorization callback carried no state'
+            : 'authorization callback state mismatch',
+        )
       }
       return result
     },

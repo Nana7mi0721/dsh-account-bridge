@@ -82,3 +82,30 @@ test('reports an API-key-only Codex CLI login as not importable instead of prete
     assert.match(mine.reason, /OAuth tokens/)
   })
 })
+
+test('a catalog entry that reports a context window of 0 falls back instead of failing the whole family', async () => {
+  // 与 claude 同一条教训（review 抓到）：`??` 不挡 0，而宿主见到非正整数会抛
+  // `INVALID_MODEL_CONTEXT`，那条错误在 `resolveModelInfoFor` 里 ⇒ provider 级连坐，
+  // 整族从模型选择器里消失。非正数一律当作「没说」。
+  const ctx = {
+    config: {},
+    log: { warn() {} },
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        models: [
+          { slug: 'gpt-5-codex', display_name: 'Codex', context_window: 0, max_output_tokens: 0 },
+          { slug: 'gpt-5.1-codex', context_window: '0' },
+        ],
+      }),
+    }),
+  }
+  const models = await codexFamily.listModels(ctx, { auth: { access: 'a', refresh: 'r' }, id: 'codex-1' })
+  assert.ok(models.length > 0, 'the catalog must still answer')
+  for (const model of models) {
+    assert.ok(Number.isInteger(model.context.contextWindow), `${model.id} contextWindow must be an integer`)
+    assert.ok(model.context.contextWindow > 0, `${model.id} contextWindow must be positive`)
+    assert.ok(Number.isInteger(model.defaultMaxTokens) && model.defaultMaxTokens > 0, `${model.id} maxTokens`)
+  }
+})

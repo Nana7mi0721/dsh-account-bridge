@@ -365,6 +365,25 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
   const order = []
   /** index → 要带回去的那一小段（只有 reasoning 块有签名）。 */
   const replaySlots = new Map()
+  /**
+   * 已经吐过 `block-start` 的 index。
+   *
+   * 两处都用得上：① 上游漏发 `content_block_start` 就直接来 delta（自建中转常见），
+   * 那时必须**先补开块再发 delta**——宿主的块类型取自第一个带 index 的 chunk，
+   * 没有开块就来 delta 会被它报 `requires an open text block`；② `content_block_stop`
+   * 只能关**开过的**块，凭空发一个 `block-end` 会让它报 `has no open block`，整条流作废。
+   */
+  const started = new Set()
+  /** 开块（幂等）：`blockType` 的口径与 `content_block_start` 那条路完全一致。 */
+  const ensureStart = function* (index, slotType) {
+    if (started.has(index)) return
+    started.add(index)
+    yield {
+      type: 'block-start',
+      index,
+      blockType: slotType === 'tool_use' ? 'tool-call' : slotType === 'thinking' ? 'reasoning' : 'text',
+    }
+  }
   const touch = (index) => {
     if (order.includes(index)) return
     order.push(index)
@@ -438,11 +457,7 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
             : {}),
         })
         sawContent = true
-        yield {
-          type: 'block-start',
-          index,
-          blockType: block.type === 'tool_use' ? 'tool-call' : block.type === 'thinking' ? 'reasoning' : 'text',
-        }
+        yield* ensureStart(index, block.type)
         if (block.type === 'tool_use') {
           yield { type: 'tool-call-delta', index, id: block.id, name: block.name, argumentsDelta: '' }
         }
@@ -466,15 +481,18 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
           slot.text += delta.text
           sawContent = true
           touch(index)
+          yield* ensureStart(index, slot.type)
           yield { type: 'text-delta', index, text: delta.text }
         } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
           slot.thinking += delta.thinking
           sawContent = true
           touch(index)
+          yield* ensureStart(index, slot.type)
           yield { type: 'reasoning-delta', index, text: delta.thinking }
         } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
           slot.json += delta.partial_json
           touch(index)
+          yield* ensureStart(index, slot.type)
           yield { type: 'tool-call-delta', index, argumentsDelta: delta.partial_json }
         } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
           // 只对回放有意义：DSH 侧不需要它，但要照原样存下来给下一轮带回去。
@@ -500,6 +518,10 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
         const slot = accumulators.get(index)
         accumulators.delete(index)
         touch(index)
+        // 没开过块就没有块可关（上游漏了 `content_block_start`，这一块也没吐出过任何
+        // delta）：凭空发一个 `block-end` 会让宿主报 `has no open block`。
+        if (!started.has(index)) break
+        started.delete(index)
         yield { type: 'block-end', index, block: blockFromSlot(slot) }
         break
       }

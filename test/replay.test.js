@@ -416,15 +416,20 @@ test('a reasoning item that carries no summary keeps what was streamed', async (
   ])
 })
 
-test('a reasoning item with no text at all is dropped by default and kept when replaying', async () => {
-  // 这是上一条的对照：**一个字都没流过**、`.done` 里也没有 summary，
-  // 这时默认丢掉（界面上不该多出一个空的思考块），开着回放才留一个空块
-  // 当载体——那是这一轮唯一能把加密状态带回去的东西。
+test('a reasoning item with no text at all is closed as an empty block, and only replaying keeps its state', async () => {
+  // 这是上一条的对照：**一个字都没流过**、`.done` 里也没有 summary。
+  //
+  // 以前这里默认把块整个丢掉——可块的开头（`output_item.added` 那一步）早就发给宿主了，
+  // 于是那条流以一个**悬空的 block-start** 收场，宿主会把整条流判失败
+  // （`finished with 1 open block(s)`）：用户看到的是这一轮一个字都没有。
+  // 现在两边都补一个空块把它关掉，差别只剩「加密状态带不带回去」。
   const onlyEncrypted = responsesTurn({ encrypted: 'enc-blob', summary: null, streamSummary: false })
   const off = await collect(translateResponsesStream(onlyEncrypted, { model: 'm' }))
   assert.deepEqual(off.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
+    { type: 'reasoning', text: '' },
     { type: 'text', text: 'hi' },
   ])
+  assertBalanced(off)
 
   const on = await collect(
     translateResponsesStream(responsesTurn({ encrypted: 'enc-blob', summary: null, streamSummary: false }), {
@@ -436,7 +441,18 @@ test('a reasoning item with no text at all is dropped by default and kept when r
     { type: 'reasoning', text: '' },
     { type: 'text', text: 'hi' },
   ])
+  assertBalanced(on)
 })
+
+/** 每个开过的块必须恰好关一次——悬空与重复关都是宿主会整条流判失败的事。 */
+function assertBalanced(chunks) {
+  const counts = new Map()
+  for (const chunk of chunks) {
+    if (chunk.type === 'block-start') counts.set(chunk.index, (counts.get(chunk.index) ?? 0) + 1)
+    if (chunk.type === 'block-end') counts.set(chunk.index, (counts.get(chunk.index) ?? 0) - 1)
+  }
+  for (const [index, delta] of counts) assert.equal(delta, 0, `block ${index} is not balanced`)
+}
 
 test('a reasoning item with no encrypted content never produces an envelope', async () => {
   const chunks = await collect(translateResponsesStream(responsesTurn({ encrypted: null }), { model: 'm', replay: true }))

@@ -100,8 +100,19 @@ export async function assertApiReply(response, { who = '' } = {}) {
   if (response.status < 200 || response.status >= 300) {
     // 见文件头：只认「声明 HTML 且真的是 HTML 文档开头」这一种，防止 403 被误判成 AUTH。
     if (!headerOf(response, 'content-type').startsWith('text/html')) return response
-    const text = await response.text().catch(() => '')
-    if (!HTML_START.test(text.replace(LEADING, ''))) return response
+    let text
+    try {
+      text = await response.text()
+    } catch {
+      return response
+    }
+    if (!HTML_START.test(text.replace(LEADING, ''))) {
+      // 走到这里说明 body **已经被我们读掉了**。原样返回等于把一份读不动的响应交给下游：
+      // 调用方随后 `.text()` / `.json()` 只会拿到空串（而且多半被 `.catch(() => '')` 吞掉），
+      // 上游真正说了什么就永久丢了——排障时看到的是一句「没原因」的 403。
+      // 所以把读到的内容装回一份等价物再还回去。
+      return new Response(text, { status: response.status, statusText: response.statusText, headers: response.headers })
+    }
     throw notApiReply(who, `upstream answered ${response.status} with a web page, not an API reply`)
   }
   if (response.status === 204) return response

@@ -42,6 +42,34 @@ export function isLoopback(req) {
   return typeof address === 'string' && LOOPBACK.has(address)
 }
 
+/** 认可的本机主机名（浏览器里的 Origin 只可能是这几个之一）。 */
+const LOOPBACK_HOSTS = new Set(['127.0.0.1', 'localhost', '::1', '[::1]'])
+
+/**
+ * 浏览器来的请求必须来自本机页面。
+ *
+ * 只查 `remoteAddress` 是不够的：**DNS rebinding 下它就是 `127.0.0.1`**——用户在某个
+ * 页面上停留，那个页面的域名被解析到本机，于是页面同源地读得到本路由的响应，还能
+ * `POST remove` / `unfreeze '*'` / `proxy`。而这一面能删账号、能起登录、能改代理，
+ * 等于把账号池交出去。
+ *
+ * 判据只对**浏览器**生效：不带 `Origin` 的请求（curl、我们这个插件的工具面、宿主自己）
+ * 一律放行；带 `Origin` 的必须是本机主机名（不限端口，免得宿主改写 Host 时误伤面板）。
+ * 浏览器对同源 `fetch` 一定会带 `Origin`，所以自带面板不会被这条挡掉。
+ */
+export function isSameOrigin(req) {
+  const origin = req?.headers?.origin
+  if (typeof origin !== 'string' || origin.length === 0) return true
+  if (origin === 'null') return false
+  let hostname
+  try {
+    hostname = new URL(origin).hostname.toLowerCase()
+  } catch {
+    return false
+  }
+  return LOOPBACK_HOSTS.has(hostname)
+}
+
 const OK = (value) => ({ ok: true, value })
 const FAIL = (code, message) => ({ ok: false, error: { code, message } })
 
@@ -492,6 +520,10 @@ export function registerAccountBridgeRoutes(options) {
   async function handler(req, res) {
     if (!isLoopback(req)) {
       writeJson(res, 403, FAIL('FORBIDDEN', 'account-bridge API is loopback-only'))
+      return
+    }
+    if (!isSameOrigin(req)) {
+      writeJson(res, 403, FAIL('FORBIDDEN', 'account-bridge API only answers pages served from this machine'))
       return
     }
     if (req.method !== 'POST') {

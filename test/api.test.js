@@ -16,13 +16,14 @@ import test from 'node:test'
 import { createMockHost } from './harness.js'
 import { PREFIX, isLoopback, publicAccount, quotaOf, registerAccountBridgeRoutes } from '../src/api.js'
 
-/** 造一个够用的假 `IncomingMessage`：异步迭代产出 body，带 socket.remoteAddress。 */
-function fakeRequest({ method = 'POST', url = '/', body = {}, remoteAddress = '127.0.0.1' } = {}) {
+/** 造一个够用的假 `IncomingMessage`：异步迭代产出 body，带 socket.remoteAddress 与请求头。 */
+function fakeRequest({ method = 'POST', url = '/', body = {}, remoteAddress = '127.0.0.1', headers = {} } = {}) {
   const text = typeof body === 'string' ? body : JSON.stringify(body)
   const chunks = text.length > 0 ? [Buffer.from(text, 'utf8')] : []
   return {
     method,
     url,
+    headers,
     socket: { remoteAddress },
     async *[Symbol.asyncIterator]() {
       yield* chunks
@@ -160,6 +161,30 @@ test('non-loopback requests are refused, and there is no bypass', async () => {
       const answer = await callApi(host, 'state', {}, { remoteAddress })
       assert.equal(answer.status, 200)
     }
+  } finally {
+    host.dispose()
+  }
+})
+
+test('a browser page that is not served from this machine is refused', async () => {
+  const host = createMockHost()
+  try {
+    // 只查 `remoteAddress` 挡不住 DNS rebinding：恶意的页面把域名解析到 127.0.0.1 之后，
+    // 那个页面同源地读得到这里的响应，还能 POST remove / unfreeze。浏览器一定会带 Origin，
+    // 所以判据就是「带 Origin 的必须是本机主机名」。**自带面板是同源 fetch，不受影响。**
+    for (const origin of ['http://evil.example', 'https://attacker.test:8443']) {
+      const answer = await callApi(host, 'state', {}, { headers: { origin } })
+      assert.equal(answer.status, 403, `${origin} should be refused`)
+      assert.equal(answer.body.error.code, 'FORBIDDEN')
+    }
+    // `Origin: null`（沙箱 iframe / file://）同样拒绝。
+    assert.equal((await callApi(host, 'state', {}, { headers: { origin: 'null' } })).status, 403)
+    // 本机页面：不限端口（宿主可能改写 Host），本轮只认主机名。
+    for (const origin of ['http://127.0.0.1:3080', 'http://localhost:5173', 'http://[::1]:3080']) {
+      assert.equal((await callApi(host, 'state', {}, { headers: { origin } })).status, 200, origin)
+    }
+    // 没有 Origin 的请求照旧放行（curl、工具面、宿主自己）。
+    assert.equal((await callApi(host, 'state')).status, 200)
   } finally {
     host.dispose()
   }

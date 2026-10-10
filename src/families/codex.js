@@ -435,8 +435,16 @@ function modelInfo(id, name, source, provider) {
     provider,
     id,
     name: name ?? id,
-    context: { contextWindow: source?.context_window ?? CONTEXT_WINDOW },
-    defaultMaxTokens: Math.min(source?.max_output_tokens ?? MAX_OUTPUT, MAX_OUTPUT),
+    // `??` 只挡 null/undefined，**不挡 0**：上游把 context_window 报成 0（或报成 0 的
+    // 字符串）时，宿主 `dsh-llm` 的 `Number.isInteger(x) && x > 0` 不满足就抛
+    // INVALID_MODEL_CONTEXT，而那条错误发生在 resolveModelInfoFor 里 ⇒ **provider 级
+    // 连坐，整族从模型选择器里消失**（trae 的 issue #8 就是同类事故）。
+    // 所以这里用 firstPositiveNumber：非正数当作「没说」，退回我们的保守值。
+    context: { contextWindow: firstPositiveNumber(source, ['context_window']) ?? CONTEXT_WINDOW },
+    defaultMaxTokens: Math.min(
+      firstPositiveNumber(source, ['max_output_tokens']) ?? MAX_OUTPUT,
+      MAX_OUTPUT,
+    ),
     toolUpdate: 'in-history',
     inputModalities: ['text', 'image'],
     reasoning: { efforts: list, ...(defaultEffort ? { defaultEffort } : {}) },

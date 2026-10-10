@@ -1404,3 +1404,21 @@ test('live: 额度端点读得到就解析成桶，读不到回 undefined', { sk
     assert.ok(buckets[0].remainingFraction >= 0 && buckets[0].remainingFraction <= 1)
   }
 })
+
+test('写回 CAS：磁盘文件的缩进风格与我们生成的不同时，基准仍然对得上', async () => {
+  // 两道 CAS 的基准必须是同一个东西：`rememberHash()` 记的是**磁盘原文**的 sha256，
+  // 所以比对时也得拿刚读到的原文比。原来比的是 `JSON.stringify(doc, null, 2)`，
+  // 于是只要用户的 auth.json 不是「两空格缩进 + 结尾换行」（CLI 各版本写法并不统一），
+  // 第一道 CAS 就**每次都判 stale**，写回被静默跳过——上游轮换 refresh token 后
+  // 本机 CLI 还捏着旧令牌，用户下次跑 `grok` 被要求重新登录，而日志说「别的进程改过文件」。
+  const fixture = await refreshFixture()
+  const doc = JSON.parse(await readFile(fixture.path, 'utf8'))
+  await writeFile(fixture.path, JSON.stringify(doc, null, 4), 'utf8') // 4 空格、无结尾换行
+  // **必须显式读一次**：`refresh()` 自己不走 `readAuthFile()`，不读的话指纹表是空的，
+  // 写回会退到第二道 CAS（比对 refresh_token），这条用例就测不到第一道了。
+  await readAuthFile(fixture.path)
+  await grokFamily.refresh(fixture.rec.ctx, fixture.payload, undefined)
+  const after = JSON.parse(await readFile(fixture.path, 'utf8'))
+  assert.equal(after[fixture.slot].key, 'access-new')
+  assert.equal(after[fixture.slot].refresh_token, 'refresh-new')
+})

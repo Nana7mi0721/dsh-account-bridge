@@ -133,3 +133,31 @@ test('thinking type comes from the model capabilities, never from a guess', () =
   assert.equal(claudeThinkingType({}), undefined)
   assert.equal(claudeThinkingType(undefined), undefined)
 })
+
+test('a catalog entry that says its context window is 0 falls back instead of failing the whole family', async () => {
+  // 上游把 `max_input_tokens` 报成 0 时，`??` 挡不住（它只挡 null/undefined），
+  // 而宿主 `dsh-llm` 见到非正整数会抛 `INVALID_MODEL_CONTEXT`——那条错误发生在
+  // `resolveModelInfoFor` 里 ⇒ **provider 级连坐，整族从模型选择器里消失**。
+  // 非正数一律当作「没说」，退回我们的保守值。
+  const ctx = {
+    config: {},
+    log: { warn() {} },
+    fetch: async () => ({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        data: [
+          { id: 'claude-opus-4-6', display_name: 'Opus', max_input_tokens: 0, max_tokens: 0 },
+          { id: 'claude-sonnet-4-6', max_input_tokens: '0' },
+        ],
+      }),
+    }),
+  }
+  const models = await claudeFamily.listModels(ctx, { auth: { access: 'a', refresh: 'r' }, id: 'claude-1' })
+  assert.ok(models.length > 0, 'the catalog must still answer')
+  for (const model of models) {
+    assert.ok(Number.isInteger(model.context.contextWindow), `${model.id} contextWindow must be an integer`)
+    assert.ok(model.context.contextWindow > 0, `${model.id} contextWindow must be positive`)
+    assert.ok(Number.isInteger(model.defaultMaxTokens) && model.defaultMaxTokens > 0, `${model.id} maxTokens`)
+  }
+})

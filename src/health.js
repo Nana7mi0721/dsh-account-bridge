@@ -28,8 +28,15 @@ import { failureWords } from './wire/failure-words.js'
 // 在这里再导出一次，是为了让 `../health.js` 的既有 import 与测试都不用改。
 export { failureWords }
 
-/** 这些族的额度是按模型分线的：配额耗尽只影响「该账号 × 该模型」。 */
-export const MODEL_SCOPED_QUOTA_FAMILIES = new Set(['claude', 'antigravity'])
+/**
+ * 这些族的额度是按模型分线的：配额耗尽只影响「该账号 × 该模型」。
+ *
+ * **这里的名字必须是族的 `id`，不是显示名。** 写错一个名字不会报错，只会让那条规则
+ * 静默失效——`'antigravity'` 是显示名的一部分，真正的族 id 是 `'agy'`，于是
+ * Antigravity 的额度用尽会把整账号所有模型一起停 15 分钟（`test/contract.test.js`
+ * 现在有一条用例逐个核对集合里的名字真在 registry 里）。
+ */
+export const MODEL_SCOPED_QUOTA_FAMILIES = new Set(['claude', 'agy'])
 
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE

@@ -510,6 +510,32 @@ docs/
    → 见 `src/failure.js`、`src/wire/http-error.js` 与 `test/failure.test.js`
    （那个文件里第一条用例是宿主算法的**复刻**：抄它的判定顺序，断言我们的错误真能过它）。
 
+## 独立审查（P7.5）：四个互不通气的审查员
+
+P7 十一个工作包做完之后，**四个独立子代理**分头读了一遍代码——各读各的、互不通气、事先不知道对方在看什么，每份结论都要求带 `文件:行号` 与可复现的合成输入：
+
+| 审查面 | 报告 | 抓到的东西 |
+|---|---|---|
+| 池子与账号决策 | `_dsh_research/review/core-pool.md` | 2 严重 + 5 次要 |
+| 协议翻译层 | `_dsh_research/review/wire-protocol.md` | 4 严重 + 7 次要（含一个能复现的假上游脚本） |
+| 十一个族 | `_dsh_research/review/families.md` | 2 严重 + 6 次要 |
+| HTTP/UI/工具面 | `_dsh_research/review/surface.md` | 2 严重 + 7 次要 |
+
+**这一轮修掉的十处**（每处都有回归用例，写在 `test/` 里）：
+
+1. **额度失败停错了范围**（`src/health.js`）：`MODEL_SCOPED_QUOTA_FAMILIES` 里写的是 `'antigravity'`，而族的 id 是 **`agy`**——集合里那个名字从来不存在，于是「这个模型额度用尽」被当成「这个账号废了」，把整个账号停掉、连带把别的模型也停了。现在集合里是真实族 id，并加了一条不变量用例：集合里的每个名字都必须是 `FAMILIES` 里真的有的 id。
+2. **`?? 兜不住 0`**（`src/families/codex.js`、`src/families/claude.js`）：上游把 `context_window` 回成 `0` 时，`?? 默认值` 放它过去，宿主拿到 `contextWindow: 0` 会判 `INVALID_MODEL_CONTEXT` 并把整个 provider 连坐。改用 `firstPositiveNumber()`。
+3. **回环回调的 state 可以被绕过**（`src/login/loopback.js`）：`result.state !== undefined && result.state !== expected` 这个写法把「回调根本没带 state」当成匹配——本机任何实体都能用 `GET /callback?code=<自己的码>` 塞一个授权码进来。现在是严格相等，并补了 `test/loopback.test.js`（4 例）。
+4. **回环数据面只认 `remoteAddress`**（`src/api.js`）：DNS rebinding 下浏览器的请求也来自 `127.0.0.1`，于是 `state` / `remove` / `unfreeze` / `proxy` 对任意网页可达。现在多一道 `Origin` 检查（**没有 Origin 的放行**——`curl` 不该被挡；`Origin: null` 拒绝）。
+5. **零参工具调用会被整条丢弃**（`src/wire/chat-completions.js`）：先发了一个合法的 `tool-call` 块，随后按「一个字都没出」抛 `EMPTY_RESPONSE`。判据改成「有名字也算交付」。
+6. **`response.output_item.done` 不带 `output_index` 时块关不上**（`src/wire/responses.js`）：补开一个空块收尾，不置「已输出」。
+7. **Anthropic 流里 delta 先于 `content_block_start` 到达**（`src/wire/anthropic.js`）：新增幂等的 `ensureStart()`，delta 前补开块；`content_block_stop` 只关真开过的块（否则悬空/重复关都会让宿主整条流判失败）。
+8. **grok 写回的两道 CAS 基准不同源**（`src/families/grok.js`）：`rememberHash()` 记的是磁盘原文，比对用的却是规范化 JSON——只要用户的 `auth.json` 不是「两空格缩进 + 结尾换行」，第一道 CAS **每次都判 stale**，写回被静默跳过，而理由被记成「别的进程改过文件」，排障方向完全是错的。
+9. **agy 把「问不到」当成「空目录」**（`src/families/agy.js`）：CLI 超时/非零退出时 `probe.signedIn=false`，`listModels()` 于是老老实实回 `[]`，池子把这份**假空目录**缓存十分钟——面板会说「没有账号提供 X」，一句我们并不知道真假的话。现在探测结果带 `unknown`，`listModels()` 抛出 `TRANSPORT`（瞬态、不罚账号、下次再问），扫描结果也照实说「这次没问出登录状态」而不是「还没登录」。
+10. **`assertApiReply` 会把正文读空再还回去**（`src/wire/assert-reply.js`）：非 2xx 且 `content-type: text/html` 时它读整个 body 嗅探，看走眼之后**原样返回一份已经读空的响应**——五个调用点都写着 `.catch(() => '')`，上游到底说了什么就永久丢了，排障时只看到一句「没原因」的 403。现在把读到的内容装回一份等价物。
+
+**这一轮没修、记在计划书里的**：闸门让位时会把冷却中的账号排到前面、`/pool sticky` 的 `full` 判据偏弱、`COOLING` 落进失败归类兜底、`gate.js` 的 rpm 队列在限额调大后不再升序、透明代理配置错误时静默直连、`account_bridge_accounts_remove` 漏了清健康/粘性状态、`discover` 把「读不出来」当成「不在本机」等十余条次要项（见《深度改进计划书》§P7.5 遗留）。
+
 ## 测试
 
 ```bash
@@ -518,7 +544,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**1045 个用例，1032 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**1063 个用例，1050 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash

@@ -87,7 +87,7 @@ function modelInfo(model, provider) {
  *
  * @param {object} [ctx]
  * @param {AbortSignal} [signal]
- * @returns {Promise<{installed: boolean, signedIn: boolean, models: Array<{id: string, name: string}>, detail: string}>}
+ * @returns {Promise<{installed: boolean, signedIn: boolean, unknown?: boolean, models: Array<{id: string, name: string}>, detail: string}>}
  */
 export async function probeAgy(ctx, signal) {
   const bin = resolveBin(ctx, 'agy', DEFAULT_BIN)
@@ -99,11 +99,11 @@ export async function probeAgy(ctx, signal) {
     if (error instanceof CliMissingError) {
       return { installed: false, signedIn: false, models: [], detail: error.message }
     }
-    return { installed: true, signedIn: false, models: [], detail: error.message }
+    return { installed: true, signedIn: false, unknown: true, models: [], detail: error.message }
   }
 
   if (result.timedOut) {
-    return { installed: true, signedIn: false, models: [], detail: `\`${bin} models\` timed out` }
+    return { installed: true, signedIn: false, unknown: true, models: [], detail: `\`${bin} models\` timed out` }
   }
   const text = `${result.stdout}\n${result.stderr}`
   if (/Please sign in|not logged into Antigravity/i.test(text)) {
@@ -113,6 +113,7 @@ export async function probeAgy(ctx, signal) {
     return {
       installed: true,
       signedIn: false,
+      unknown: true,
       models: [],
       detail: `\`${bin} models\` exited with ${result.code}: ${result.stderr.trim().slice(-200)}`,
     }
@@ -136,6 +137,18 @@ export const agyFamily = {
     const probe = await probeAgy(ctx)
     if (!probe.installed) return []
     if (!probe.signedIn) {
+      // 「问不到」与「确定没登录」必须分开说：前者说成「未登录」会让用户去终端里
+      // 白折腾一趟，而真正的原因（超时、CLI 版本变了、退出码不为 0）就在 detail 里。
+      if (probe.unknown) {
+        return [
+          {
+            family: 'agy',
+            label: 'agy CLI（这次问不出来）',
+            importable: false,
+            reason: `本机的 agy CLI 装是装上了，但这次没问出登录状态：${probe.detail}。装好/登录好后重新扫描一次试试。`,
+          },
+        ]
+      }
       return [
         {
           family: 'agy',
@@ -178,6 +191,13 @@ export const agyFamily = {
 
   async listModels(ctx, _payload, signal) {
     const probe = await probeAgy(ctx, signal)
+    if (probe.unknown) {
+      // 「问不到」不是「没有模型」。返回 `[]` 会被池子当成一份**真实的空目录**缓存十分钟
+      // （`#catalog` 的 TTL），于是面板和模型选择器会说「没有账号提供 X」——一句我们
+      // 并不知道真假的话（magpie LESSONS #9：读失败永不等于空）。抛出去让池子把这次
+      // 目录查询记成失败：瞬态、不罚账号，下次还会再问。
+      throw Object.assign(new Error(`agy: 问不到模型目录（${probe.detail}）`), { code: 'TRANSPORT' })
+    }
     if (!probe.signedIn) return []
     return probe.models.map((model) => modelInfo(model, this.route))
   },

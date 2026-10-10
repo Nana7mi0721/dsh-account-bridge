@@ -501,8 +501,10 @@ function modelInfo(id, name, entry, provider) {
     provider,
     id,
     name: name ?? id,
-    context: { contextWindow: entry?.max_input_tokens ?? DEFAULT_CONTEXT_WINDOW },
-    defaultMaxTokens: entry?.max_tokens ?? DEFAULT_MAX_TOKENS,
+    // 与 codex 同一条教训：`??` 不挡 0，而上游报 0 会让宿主抛 INVALID_MODEL_CONTEXT
+    // 并把整族从选择器里摘掉。非正数一律当作「没说」。
+    context: { contextWindow: firstPositiveNumber(entry, ['max_input_tokens']) ?? DEFAULT_CONTEXT_WINDOW },
+    defaultMaxTokens: firstPositiveNumber(entry, ['max_tokens']) ?? DEFAULT_MAX_TOKENS,
     toolUpdate: 'in-history',
     inputModalities: ['text', 'image'],
     ...(efforts.length > 0 ? { reasoning: { efforts } } : {}),
