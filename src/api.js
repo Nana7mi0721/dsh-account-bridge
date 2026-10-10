@@ -180,6 +180,23 @@ export function registerAccountBridgeRoutes(options) {
     throw Object.assign(new Error(`no such account "${accountId}"`), { code: 'NOT_FOUND' })
   }
 
+  /**
+   * 就地改一条记录，**记录不在了就什么都不写**。
+   *
+   * `mutate` 以前是 `(current) => ({ ...current, … })`：从 `locate()` 到 `update()`
+   * 之间记录要是被删掉了，`current` 就是 `undefined`，展开它得到的是一份
+   * **只剩被改的那一个字段**的新记录——我们不但没改成，还凭空造了一条半截账号出来
+   * （magpie `LESSONS.md` 第 9 条的同一个形状：读不出来被当成没有，写盘时把真数据抹掉）。
+   * 现在记录不在就返回 `undefined`（`store.update` 的约定是「不改」），由这里报 NOT_FOUND。
+   */
+  async function amend(account, mutate) {
+    const next = await store.update(account.id, (current) => (current ? mutate(current) : undefined))
+    if (next === undefined) {
+      throw Object.assign(new Error(`no such account "${account.id}"`), { code: 'NOT_FOUND' })
+    }
+    return next
+  }
+
   /** 族 + 账号 + 健康 + 额度 的完整快照。 */
   async function snapshot({ withQuota = false } = {}) {
     const pools = await adapter.status()
@@ -264,7 +281,7 @@ export function registerAccountBridgeRoutes(options) {
     async toggle(body) {
       const { family, account } = await locate(body.account)
       const disabled = body.disabled === undefined ? account.disabled !== true : body.disabled === true
-      await store.update(account.id, (current) => ({ ...current, disabled }))
+      await amend(account, (current) => ({ ...current, disabled }))
       adapter.invalidate(family.id)
       adapter.invalidateHealth()
       if (!disabled) adapter.clearSticky?.(family.id)
@@ -275,7 +292,7 @@ export function registerAccountBridgeRoutes(options) {
     async proxy(body) {
       const { family, account } = await locate(body.account)
       const raw = body.proxy === undefined || body.proxy === null ? '' : String(body.proxy).trim()
-      await store.update(account.id, (current) => {
+      await amend(account, (current) => {
         const next = { ...current }
         if (raw.length === 0) delete next.proxy
         else next.proxy = raw

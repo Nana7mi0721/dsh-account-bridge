@@ -629,9 +629,21 @@ export async function writeBackAuth(next, payload = {}) {
   const doc = tryJson(text)
   if (!doc || typeof doc !== 'object' || Array.isArray(doc) || !doc[slot]) return { ok: false, reason: 'gone' }
 
+  // 两道 CAS。第一道是「本进程读过这个文件吗」的指纹比对；**没读过不等于文件没变**
+  // （magpie 的 LESSONS #9：把「读不出来」当成「相等」，于是删掉了副本）。
+  // 所以没有指纹基准时退到第二道——内容比对：文件里那条记录的 refresh 必须还是
+  // 我们这次拿去刷新的那一个。DSH 重启之后账户是从凭据记录里恢复的，那时指纹表是空的，
+  // 走的就是第二道。
   const before = fileHashByPath.get(path)
-  const actual = hashDoc(doc)
-  if (before !== undefined && before !== actual) return { ok: false, reason: 'stale' }
+  if (before !== undefined) {
+    if (before !== hashDoc(doc)) return { ok: false, reason: 'stale' }
+  } else {
+    const onDisk = pickString(doc[slot], ['refresh_token', 'refresh'])
+    const ours = typeof payload.auth?.refresh === 'string' && payload.auth.refresh.length > 0 ? payload.auth.refresh : undefined
+    // 我们没有基准、也没有可以比对的旧令牌 ⇒ **不写**。写回去的前提是能说清
+    // 「磁盘上那份还是我读到的那份」，说不清就不动用户的东西。
+    if (ours === undefined || onDisk !== ours) return { ok: false, reason: 'stale' }
+  }
 
   doc[slot] = {
     ...doc[slot],

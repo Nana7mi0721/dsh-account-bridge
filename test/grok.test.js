@@ -984,6 +984,68 @@ test('写回 CAS：文件没被改过就正常写入，且不产生临时文件�
   assert.ok(dir.includes('access-new'))
 })
 
+test('写回 CAS：没读到过基准时也要比内容 —— 磁盘上是另一条血统就不写', async () => {
+  const fixture = await refreshFixture()
+  // 故意**不**先调 readAuthFile()：这正是 DSH 重启之后的样子——账号是从凭据记录里
+  // 恢复出来的，进程内的指纹表（`fileHashByPath`）是空的。旧代码在这条路上
+  // 因为 `before === undefined` 直接跳过了检查，于是把一只别人已经作废的令牌盖回去。
+  const doc = JSON.parse(await readFile(fixture.path, 'utf8'))
+  doc[fixture.slot].refresh_token = 'refresh-from-someone-else'
+  await writeFile(fixture.path, `${JSON.stringify(doc, null, 2)}\n`, 'utf8')
+
+  const result = await writeBackAuth(
+    { access: 'access-new', refresh: 'refresh-new', expiresAt: 1_800_000_000_000 },
+    fixture.payload,
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'stale')
+  const after = JSON.parse(await readFile(fixture.path, 'utf8'))
+  assert.equal(after[fixture.slot].key, 'access-old', '文件必须一个字节都没动')
+  assert.equal(after[fixture.slot].refresh_token, 'refresh-from-someone-else')
+})
+
+test('写回 CAS：手上没有可比对的旧令牌时放弃写，而不是当空文件覆盖', async () => {
+  const fixture = await refreshFixture()
+  const result = await writeBackAuth(
+    { access: 'access-new', refresh: 'refresh-new', expiresAt: 1_800_000_000_000 },
+    { ...fixture.payload, auth: { ...fixture.payload.auth, refresh: undefined } },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'stale')
+  const after = JSON.parse(await readFile(fixture.path, 'utf8'))
+  assert.equal(after[fixture.slot].key, 'access-old')
+})
+
+test('写回 CAS：没读到过基准、但磁盘上就是我们这条血统时可以写', async () => {
+  // 与上面两条互补：不做内容比对的话，重启之后就永远写不回去 = 每次刷新都把
+  // 桌面 CLI 的令牌留成旧的。所以第二道 CAS 是「比内容」，不是「一律不写」。
+  const fixture = await refreshFixture()
+  const result = await writeBackAuth(
+    { access: 'access-new', refresh: 'refresh-new', expiresAt: 1_800_000_000_000 },
+    fixture.payload,
+  )
+  assert.deepEqual(result, { ok: true })
+  const after = JSON.parse(await readFile(fixture.path, 'utf8'))
+  assert.equal(after[fixture.slot].key, 'access-new')
+  assert.equal(after[fixture.slot].refresh_token, 'refresh-new')
+  // CLI 自己的字段不能被抹掉。
+  assert.equal(after[fixture.slot].user_id, 'user-1')
+  assert.equal(after[fixture.slot].oidc_client_id, GROK_CLIENT_ID)
+})
+
+test('写回 CAS：读不出文件内容时是 unreadable，绝不当成「空的，可以写」', async () => {
+  const home = await makeHome()
+  const path = join(home, 'auth.json')
+  await writeFile(path, 'not json at all', 'utf8')
+  const result = await writeBackAuth(
+    { access: 'access-new', refresh: 'refresh-new', expiresAt: 1_800_000_000_000 },
+    { family: 'grok', auth: { refresh: 'refresh-old' }, sourcePath: path, externallyOwned: true },
+  )
+  assert.equal(result.ok, false)
+  assert.equal(result.reason, 'unreadable')
+  assert.equal(await readFile(path, 'utf8'), 'not json at all', '坏掉的文件也不能被我们改写')
+})
+
 test('refresh：本机文件不可写时只记警告，刷新结果照常返回', async () => {
   const fixture = await refreshFixture()
   const broken = { ...fixture.payload, sourcePath: join(fixture.home, 'nope', 'auth.json') }

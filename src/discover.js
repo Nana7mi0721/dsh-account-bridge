@@ -87,7 +87,15 @@ export function identityOf(family, item) {
   return createHash('sha256').update(`${family}\u0000${identityMaterial(item)}`).digest('hex').slice(0, 16)
 }
 
-/** 文件存在吗（不抛错）。 */
+/**
+ * 文件存在吗（不抛错）。
+ *
+ * 注意它与 W9 那条「未知 ≠ 空」规则的关系：读不出来时这里返回 `false`，
+ * 也就是把「不知道」说成「不在」。**这一处是故意的**——它只用来给未实现族
+ * 挂一句「你机器上好像装了 xxx」的提示，而在拿不准的时候少说一句话，
+ * 比对着一个读不动的路径宣称「你装过」要好。（别的地方不许照抄这个取舍：
+ * 只要那个「空」会流向一次写盘，就必须区分。）
+ */
 async function exists(path) {
   try {
     await access(path)

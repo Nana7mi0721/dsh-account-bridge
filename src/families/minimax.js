@@ -83,23 +83,47 @@ export function statePath(region) {
  *
  * 记录键里**含一个 NUL 字节**（`com.minimax.mcode.oauth.prod.en\u0000<随机串>`），
  * 所以只能整个 `records` 取第一个键，不能按名字拼——拼出来的键永远找不到。
+ *
+ * 返回 `{kind:'ok', …凭据}` / `{kind:'missing'}` / `{kind:'unreadable', detail}`。
+ *
+ * **为什么不合并成「拿不到就 undefined」**：magpie 的 `LESSONS.md` 第 9 条记了三次真实事故，
+ * 其中两次的根都是「读不出来」被当成了「空的」。「文件不在」和「文件在那儿但我读不懂」
+ * 对用户是两件完全不同的事：前者要他去装、去登录，后者要他去看那个文件。
+ * 发现页把两者说成一样，用户就只能靠猜——而这件事的代价正好是「他以为已经导入了」。
  */
 export async function readDesktop(region) {
   const path = credentialPath(region)
+  let text
+  try {
+    text = await readFile(path, 'utf8')
+  } catch (error) {
+    if (error?.code === 'ENOENT') return { kind: 'missing', path }
+    return { kind: 'unreadable', path, detail: `读不了（${error?.code ?? error?.message ?? error}）` }
+  }
   let doc
   try {
-    doc = JSON.parse(await readFile(path, 'utf8'))
-  } catch {
-    return undefined
+    doc = JSON.parse(text)
+  } catch (error) {
+    return { kind: 'unreadable', path, detail: `不是合法 JSON（${error?.message ?? error}）` }
   }
   const records = doc?.records
-  if (!records || typeof records !== 'object') return undefined
+  if (!records || typeof records !== 'object') return { kind: 'unreadable', path, detail: '文件里没有 records 对象' }
   const key = Object.keys(records)[0]
   const record = key ? records[key] : undefined
-  if (typeof record?.accessToken !== 'string' || record.accessToken.length === 0) return undefined
-  if (typeof record?.refreshToken !== 'string' || record.refreshToken.length === 0) return undefined
-  if (!Number.isFinite(record?.expiresAtMs)) return undefined
+  if (!record || typeof record !== 'object') return { kind: 'unreadable', path, detail: 'records 是空的' }
+  // 字段不全也算「读不出来」：这份文件确实在，只是不像一份登录态。
+  // 说成「没登录」会把用户送去重新登录，而他其实只需要让桌面端自己刷一轮。
+  if (typeof record.accessToken !== 'string' || record.accessToken.length === 0) {
+    return { kind: 'unreadable', path, detail: '记录里没有 accessToken' }
+  }
+  if (typeof record.refreshToken !== 'string' || record.refreshToken.length === 0) {
+    return { kind: 'unreadable', path, detail: '记录里没有 refreshToken' }
+  }
+  if (!Number.isFinite(record.expiresAtMs)) {
+    return { kind: 'unreadable', path, detail: '记录里没有可用的 expiresAtMs' }
+  }
   return {
+    kind: 'ok',
     region,
     path,
     key,
@@ -231,11 +255,24 @@ export const minimaxFamily = {
     const out = []
     for (const region of REGIONS) {
       const desktop = await readDesktop(region)
-      if (!desktop) continue
+      const where = region === 'cn' ? '国内' : '国际'
+      if (desktop.kind === 'unreadable') {
+        // 文件在那儿但读不懂——**要说出来**。沉默会让用户以为「没装」，然后去重装，
+        // 而真正该做的是看一眼那个文件（或者让桌面端自己重写一遍）。
+        out.push({
+          family: 'minimax',
+          sourcePath: desktop.path,
+          label: `MiniMax Code（${where}）`,
+          importable: false,
+          reason: `${desktop.path} 存在但读不出登录态：${desktop.detail}`,
+        })
+        continue
+      }
+      if (desktop.kind !== 'ok') continue
       out.push({
         family: 'minimax',
         sourcePath: desktop.path,
-        label: region === 'cn' ? 'MiniMax Code（国内）' : 'MiniMax Code（国际）',
+        label: `MiniMax Code（${where}）`,
         importable: true,
         externallyOwned: true,
         reason: '令牌与桌面端共用一份，刷新后会写回（带 generation 冲突检查）',
@@ -283,14 +320,23 @@ export const minimaxFamily = {
     methods: [{ id: 'import', label: '导入本机 MiniMax Code 登录' }],
     async run(session, ctx) {
       let desktop
+      const broken = []
       for (const region of REGIONS) {
-        desktop = await readDesktop(region)
-        if (desktop) break
+        const found = await readDesktop(region)
+        if (found.kind === 'ok') {
+          desktop = found
+          break
+        }
+        // 「读不懂」与「不在」要分开报：前者重装也没用，得去看那个文件。
+        if (found.kind === 'unreadable') broken.push(`${found.path}（${found.detail}）`)
       }
       if (!desktop) {
         throw new Error(
-          '没有找到 MiniMax Code 的登录态。请先安装 MiniMax Code 并在里面登录一次'
-            + `（国际版凭据在 ${credentialPath('en')}，国内版在 ${credentialPath('cn')}），再回来导入。`,
+          broken.length > 0
+            ? `找到了 MiniMax Code 的凭据文件但读不出登录态：${broken.join('；')}。`
+              + '请打开一次 MiniMax Code 让它把文件重写一遍，再回来导入。'
+            : '没有找到 MiniMax Code 的登录态。请先安装 MiniMax Code 并在里面登录一次'
+              + `（国际版凭据在 ${credentialPath('en')}，国内版在 ${credentialPath('cn')}），再回来导入。`,
         )
       }
       await session.commit({
@@ -326,7 +372,8 @@ export const minimaxFamily = {
     // 拿导入时的旧值去比永远不相等 ⇒ 永远不写回 ⇒ 我们在服务端轮换掉的那对令牌
     // 在桌面端就成了死令牌，用户下次打开 MiniMax Code 直接被要求重新登录。
     // 顺带这也让「磁盘上更新」自愈：磁盘上是哪条刷新令牌血统，就用哪条。
-    const desktop = payload.externallyOwned === true ? await readDesktop(region) : undefined
+    const found = payload.externallyOwned === true ? await readDesktop(region) : undefined
+    const desktop = found?.kind === 'ok' ? found : undefined
 
     // **读不到桌面端凭据就不许刷。**
     // MiniMax 的 refresh token 是一次性的：一旦我们拿着它换出新令牌，旧的那条服务端
@@ -335,9 +382,12 @@ export const minimaxFamily = {
     // 而且不可逆。真机上已经发生过一次（开发期的写回 bug，桌面端被迫重新登录）。
     // 所以宁可报错也不刷：让用户先打开 MiniMax Code 让它自己刷一轮（它会写回），
     // 再回来重新导入，两边就重新对齐了。
+    // 「文件不在」与「文件读不懂」在这里**都**拒绝刷新，但说的话不一样——
+    // 前者要他去重启桌面端，后者要他去看看那个文件。
     if (payload.externallyOwned === true && !desktop) {
+      const why = found?.kind === 'unreadable' ? `${found.path}：${found.detail}` : `找不到 ${credentialPath(region)}`
       const error = new Error(
-        `minimax: 读不到桌面端凭据（${credentialPath(region)}），拒绝刷新。` +
+        `minimax: 读不到桌面端凭据（${why}），拒绝刷新。` +
           'MiniMax 的刷新令牌是一次性的，刷新会让桌面端那份作废而无法写回。' +
           '请先打开 MiniMax Code 让它自己刷新一次，再重新导入。',
       )

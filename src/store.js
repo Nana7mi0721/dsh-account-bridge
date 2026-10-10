@@ -105,8 +105,23 @@ export class AccountStore {
 
   /** 列出全部账号（可选按族过滤），按 id 排序。 */
   async list(family) {
+    return (await this.#scan(family)).accounts
+  }
+
+  /**
+   * 扫描本插件的记录，分出「能用的账号」与「占了号但读不出内容的」。
+   *
+   * 为什么要分出来：`list()` 只回能读的那些，而 `nextAccountId()` 过去只问 `list()`。
+   * 于是——一条记录在，payload 却读不出来时（别人往同一个 scope 写过东西、记录被截断、
+   * 旧版本留下的空壳），那个号就不在 `list()` 里 ⇒ 被判为「空闲」⇒ `write()` 上去
+   * 把它**整条覆盖**。这正是 magpie `LESSONS.md` 第 9 条的形状：读不出来被当成没有，
+   * 下一次写盘把真数据抹掉。所以读不出来的号要**占住**：宁可对外少显示一个账号，
+   * 也不要把新账号写到它的位置上。
+   */
+  async #scan(family) {
     const records = await this.#credentials.listRecords()
-    const out = []
+    const accounts = []
+    const reserved = []
     for (const entry of records) {
       const parsed = splitKey(entry.key)
       if (!parsed || parsed.scope !== SCOPE) continue
@@ -115,16 +130,19 @@ export class AccountStore {
       if (!account) continue
       if (family !== undefined && account.family !== family) continue
       const payload = await this.read(parsed.id)
-      if (payload) out.push(payload)
+      if (payload) accounts.push(payload)
+      else reserved.push(parsed.id)
     }
-    out.sort((a, b) => String(a.id).localeCompare(String(b.id)))
-    return out
+    accounts.sort((a, b) => String(a.id).localeCompare(String(b.id)))
+    return { accounts, reserved }
   }
 
   /** 该族下一个可用的账号 id（最小未占用序号）。 */
   async nextAccountId(family) {
     assertSegment(family, 'family')
-    const used = new Set((await this.list(family)).map((account) => account.id))
+    const { accounts, reserved } = await this.#scan(family)
+    // 读得出内容的、以及读不出内容但确实占着号的，一律算已占用。
+    const used = new Set([...accounts.map((account) => account.id), ...reserved])
     for (let index = 1; index < 1000; index += 1) {
       const id = `${family}-${index}`
       if (!used.has(id)) return id

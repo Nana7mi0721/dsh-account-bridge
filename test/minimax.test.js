@@ -15,7 +15,7 @@ import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { minimaxFamily, authFromGrant, writeBackDesktop, credentialPath, statePath } from '../src/families/minimax.js'
+import { minimaxFamily, authFromGrant, readDesktop, writeBackDesktop, credentialPath, statePath } from '../src/families/minimax.js'
 
 /** 真实记录键的形状：中间那个 NUL 字节是上游自己写进去的。 */
 const RECORD_KEY = 'com.minimax.mcode.oauth.prod.en\u0000a1b2c3d4'
@@ -545,4 +545,119 @@ test('credentialPath and statePath point at the desktop app own files', () => {
     if (previous === undefined) delete process.env.MINIMAX_HOME
     else process.env.MINIMAX_HOME = previous
   }
+})
+
+// ------------------------------------------------- P7-W9：未知 ≠ 空
+
+/**
+ * 「文件不在」与「文件读不懂」必须给出**不同**的结论。
+ *
+ * 说成「没登录」的代价是用户去重装一遍 MiniMax Code——而文件就在那儿，只是读不懂；
+ * 真正该做的是打开一次桌面端让它把文件重写一遍。而且**读不懂绝不能触发出站请求**：
+ * MiniMax 的刷新令牌是一次性的，刷了却写不回去，等于把桌面端单方面踢下线。
+ */
+test('readDesktop：不存在的文件是 missing，不是 unreadable', async () => {
+  await withMinimaxHome('en', undefined, async () => {
+    const found = await readDesktop('en')
+    assert.equal(found.kind, 'missing')
+    assert.match(found.path, /auth\.json$/)
+  })
+})
+
+test('readDesktop：文件在但 JSON 坏了 ⇒ unreadable，且带上路径与原因', async () => {
+  await withMinimaxHome('en', undefined, async (_home) => {
+    const path = credentialPath('en')
+    await writeFile(path, '{ this is not json', 'utf8')
+    const found = await readDesktop('en')
+    assert.equal(found.kind, 'unreadable')
+    assert.equal(found.path, path)
+    assert.match(found.detail, /不是合法 JSON/)
+    // 关键区别：这里绝不能是 'missing'。
+    assert.notEqual(found.kind, 'missing')
+  })
+})
+
+test('readDesktop：字段不全也算读不出来（说成「没登录」会把人送去重装）', async () => {
+  await withMinimaxHome('en', { records: { k: { accessToken: 'a' } } }, async () => {
+    const found = await readDesktop('en')
+    assert.equal(found.kind, 'unreadable')
+    assert.match(found.detail, /refreshToken/)
+  })
+})
+
+test('discovery：读不懂的文件要**说出来**，不是假装没装', async () => {
+  await withMinimaxHome('en', undefined, async () => {
+    await writeFile(credentialPath('en'), 'not json at all', 'utf8')
+    const items = await minimaxFamily.discover()
+    assert.equal(items.length, 1)
+    assert.equal(items[0].importable, false, '读不懂的东西不许被导进来')
+    assert.match(items[0].reason, /存在但读不出登录态/)
+    assert.match(items[0].reason, /auth\.json/)
+    // 沉默会让用户以为没装。
+    assert.notEqual(items.length, 0)
+  })
+})
+
+test('login：读不懂的文件给出的提示与「没装」不同', async () => {
+  await withMinimaxHome('en', undefined, async () => {
+    await writeFile(credentialPath('en'), 'still not json', 'utf8')
+    await assert.rejects(
+      () => minimaxFamily.login.run({ commit() {} }, {}),
+      (error) => {
+        assert.match(error.message, /读不出登录态/)
+        assert.match(error.message, /打开一次 MiniMax Code/)
+        assert.doesNotMatch(error.message, /请先安装 MiniMax Code/)
+        return true
+      },
+    )
+  })
+})
+
+test('login：真的没装时说的是「请先安装并登录一次」', async () => {
+  await withMinimaxHome('en', undefined, async () => {
+    await assert.rejects(
+      () => minimaxFamily.login.run({ commit() {} }, {}),
+      (error) => {
+        assert.match(error.message, /请先安装 MiniMax Code/)
+        return true
+      },
+    )
+  })
+})
+
+test('refresh：桌面端文件读不懂时拒绝刷新，且一个出站请求都不发', async () => {
+  await withMinimaxHome('en', undefined, async () => {
+    await writeFile(credentialPath('en'), 'corrupt', 'utf8')
+    const ctx = fakeCtx(() => {
+      throw new Error('不该走到这里：读不懂凭据时不许发请求')
+    })
+    await assert.rejects(
+      () => minimaxFamily.refresh(ctx, { externallyOwned: true, auth: { refresh: 'mmort_x', region: 'en' } }, undefined),
+      (error) => {
+        assert.equal(error.code, 'AUTH')
+        assert.match(error.message, /拒绝刷新/)
+        assert.match(error.message, /读不出登录态|corrupt/)
+        return true
+      },
+    )
+    assert.equal(ctx.calls.length, 0, '刷新令牌是一次性的：刷了却写不回去等于把桌面端踢下线')
+  })
+})
+
+test('refresh：文件被删掉也拒绝刷新，但说的是「找不到」', async () => {
+  await withMinimaxHome('en', credentialDoc(), async (_home) => {
+    await rm(credentialPath('en'))
+    const ctx = fakeCtx(() => {
+      throw new Error('不该走到这里')
+    })
+    await assert.rejects(
+      () => minimaxFamily.refresh(ctx, { externallyOwned: true, auth: { refresh: 'mmort_x', region: 'en' } }, undefined),
+      (error) => {
+        assert.equal(error.code, 'AUTH')
+        assert.match(error.message, /找不到/)
+        return true
+      },
+    )
+    assert.equal(ctx.calls.length, 0)
+  })
 })
