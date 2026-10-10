@@ -46,6 +46,7 @@
 |---|---|---|---|
 | `internal/gateway/notapi.go` | `src/wire/assert-reply.js` | `notAnAPIReply`：2xx 却不是 API 回复的判定顺序（Content-Type 是 HTML 直接拒；body 首字节即 EOF 拒；`Content-Encoding` 非 `identity` 时跳过全部嗅探；HTML 特征命中且 CT 不含 `xml` 才拒；CT 含 `json` 但首字节不是 `{`/`[` 才拒）、`htmlStart` 正则、以及「只 `Peek` 一次、绝不为了嗅探把缓冲攒满」 | Go → JS 重写。**改了两处**：① magpie 只处理 2xx（非 2xx 归它自己的分类器），我们对**非 2xx** 也加了一条最窄的检查（CT 是 `text/html` **且** body 真的是 HTML 文档开头）——因为我们的 `httpError` 会把 403 判成 AUTH 并把账号冷却 24 小时，于是「Cloudflare 拦了一下」会变成「这个账号令牌废了」；② magpie 把响应改写成 502 JSON，我们抛带 `code='NOT_AN_API_REPLY'` 的 Error，因为我们的分类器吃 `error.code`（归类为瞬时故障，换号但不罚账号）。 |
 | `internal/gateway/fallback.go` | `src/pool.js` | 换号窗口的三个上限（`holdLongest` / `holdThinking` / `holdMost`）与「哪个厂商会在只思考之后用安全策略拒绝」的判据（`refusesAfterThinking`）：Claude 系与 GPT 系 true，模型名去掉最后一段 `/` 之后以 `gemini` 开头 true，**其余 false** | Go → JS 重写；常量语义照搬（15s / 4min / 1 MiB），注释改写为中文并保留 issue 编号「#248」。**改了一处**：magpie 在憋住期间会往流里写保活注释，我们**不做**——它是自己写 HTTP 响应头的外层网关，`Codex` 会等流的下一帧等 300 秒；我们是进程内 adapter，没有能写 SSE 注释的那一层，宿主也没有流空闲超时（`dsh-llm` 全文无 `idle`/`stall`/`keepalive`），所以保活在这里无处可写也无必要。 |
+| `internal/gateway/routing.go` | `src/wire/failure-words.js`、`src/health.js` | 退避常量表（`longestWait` 1h / `longestQuota` 8d / `longestRetry` 10min / `longestRateRest` 30min / `rateForget` 30min / `creditRest` 30min / `quotaRest` 15min，以及 `fallback.go:35` 的 `fallbackCooldown` 1min）、`failure()` 的 429 / 402 文本判定顺序与六个正则（`creditWords` / `brokeWords` / `usedUpWords` / `rateWords` / `plannedWords` / `resetsWords`）、`rateRest()` 的退避算法（还在冷却里就不再拉长、冷却结束后 `rateForget` 内 +1、上游说的时长**不短于**退避值才生效）、`retryAfter()` 把 `Retry-After` 与「同时含 `reset` 与 `ratelimit` 的头」裁到 `longestWait` | Go → JS 重写；常量名与 issue 编号（#147 / #153）留中文注释。**改了四处**：① `rateForget` 对两种退避（限流与普通故障）都生效，magpie 只给限流设遗忘期、`failOther` 一路累加；② `THROTTLED_STATUS` 含 503/529，magpie 只认 429，于是「503 + Rate limit exceeded」在这里会被认成限流而不是「服务器炸了」；③ `BROKE_WORDS` 多两条（`out of (credits?|funds?|balance)` / `no (credits?|funds?|balance)`），magpie 只认 `insufficient.?(balance\|credit\|fund)`；④ `quotaRest` 由 5 分钟改为 15 分钟，并把 402 / `ACCOUNT_QUOTA` 从额度里拆成 `CREDIT`（罚整个账号）。**未借用**：`Limit.For()` 的窗口级 `resetAt` 规则（它服务额度读数驱动的路由，属 W6/W7）。 |
 
 ### RelayKit / new-api（AGPL-3.0，Copyright QuantumNous）
 
@@ -62,7 +63,7 @@
 
 | 上游文件 | 计划用在本仓 | 内容 | 计划怎么改 |
 |---|---|---|---|
-| `internal/gateway/routing.go` | `src/health.js`、`src/select.js` | 退避常量表、429 文本分流、额度分档与「重置最快优先」、「相差 1/10 视为同档」的离散分带 | Go → JS 重写 |
+| `internal/gateway/routing.go` | `src/select.js` | 额度分档与「重置最快优先」、「相差 1/10 视为同档」的离散分带（W6/W7 用；退避常量与 `failure()` 词表已在 W3 落地，见上一节） | Go → JS 重写 |
 | `internal/gateway/sink.go` | `src/select.js` | 被限流（而非额度用尽）的账号沉到路由末尾，以及「沉得早的排在沉得晚的前面」 | Go → JS 重写 |
 | `internal/gateway/affinity.go` | `src/affinity.js` | 会话粘性的跨轮保持判据（按上游实际回报的缓存读取量，而不是固定 TTL） | Go → JS 重写 |
 | `internal/gateway/rpm.go`、`busy.go` | `src/gate.js` | 每分钟请求数闸门与并发闸门；「每一次真正发出的请求都计数」；等待超限改为明确拒绝 | Go → JS 重写 |

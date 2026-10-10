@@ -11,6 +11,7 @@ import assert from 'node:assert/strict'
 import test from 'node:test'
 
 import { httpError, mapStatus, retryAfterMs } from '../src/wire/http-error.js'
+import { classifyFailure } from '../src/health.js'
 
 function response(status, headers = {}) {
   return {
@@ -59,6 +60,36 @@ test('a 429 is a quota failure only when the text says so', () => {
   assert.equal(mapStatus(429, 'you have hit your quota'), 'QUOTA')
   // claude 版认得这个措辞，codex 版原先不认。
   assert.equal(mapStatus(429, 'extra usage required'), 'QUOTA')
+})
+
+test('the code the host sees and the rest the pool takes come from ONE vocabulary', () => {
+  // 真机验收发现的漂移：Zhipu 的 GLM Coding Plan 用「余额不足或无可用资源包，请充值」回 429。
+  // `classifyFailure()` 按「没钱」处理（停整个账号半小时），而 `mapStatus()` 当时还写
+  // `RATE_LIMIT`——屏幕上写限流、账号却按欠费冻着。现在两边都读 `wire/failure-words.js`。
+  assert.equal(mapStatus(429, '余额不足或无可用资源包，请充值'), 'ACCOUNT_QUOTA')
+  assert.equal(mapStatus(429, 'insufficient balance, please top up'), 'ACCOUNT_QUOTA')
+  // `Rate limit exceeded` 不能因为「exceeded」被当成额度证据（magpie #153）。
+  assert.equal(mapStatus(429, 'Rate limit exceeded'), 'RATE_LIMIT')
+
+  // 不变量本身：`error.code` 与冷却裁决必须永远一致。
+  const cases = [
+    ['Rate limit exceeded', 'RATE_LIMIT'],
+    ['Rate limit exceeded, come back next week', 'RATE_LIMIT'],
+    ['extra usage required', 'QUOTA'],
+    ['usage limit reached', 'QUOTA'],
+    ['余额不足或无可用资源包，请充值', 'ACCOUNT_QUOTA'],
+    ['insufficient_quota', 'ACCOUNT_QUOTA'],
+  ]
+  const wantRest = { RATE_LIMIT: 'RATE_LIMIT', QUOTA: 'QUOTA', ACCOUNT_QUOTA: 'CREDIT' }
+  for (const [detail, code] of cases) {
+    assert.equal(mapStatus(429, detail), code, detail)
+    const message = `generic: HTTP 429 ${detail}`
+    const error = Object.assign(new Error(message), {
+      code,
+      failure: { message, status: 429, code },
+    })
+    assert.equal(classifyFailure(error, 'generic').reason, wantRest[code], detail)
+  }
 })
 
 test('a 402 is an account-level quota failure and a context 400 is its own code', () => {

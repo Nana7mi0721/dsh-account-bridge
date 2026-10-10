@@ -15,6 +15,7 @@
  */
 
 import { tryJson } from '../util.js'
+import { failureWords } from './failure-words.js'
 
 /** 非 2xx 响应 → 带 DSH provider 中立码的错误。 */
 export function httpError(response, text, who) {
@@ -62,7 +63,13 @@ export function mapStatus(status, detail = '') {
   if (AUTH_DETAIL.test(text)) return 'AUTH'
   if (status === 402) return 'ACCOUNT_QUOTA'
   if (status === 429) {
-    if (text.includes('quota') || text.includes('usage limit') || text.includes('extra usage')) return 'QUOTA'
+    // 走**同一套词表**（`./failure-words.js`）。这里定的是宿主与用户看得见的 `error.code`，
+    // 而 `src/health.js` 的 `classifyFailure()` 用同一套词表决定停哪个号、停多久——
+    // 各写一份就会漂移：屏幕上写 `RATE_LIMIT`，账号却按「余额不足」冻了半小时（真机验收
+    // 里 Zhipu 的「余额不足或无可用资源包，请充值」就是这么被发现的）。
+    const said = failureWords(status, text)
+    if (said === 'quota') return 'QUOTA'
+    if (said === 'credit') return 'ACCOUNT_QUOTA'
     return 'RATE_LIMIT'
   }
   if (status === 400 && text.includes('context')) return 'CONTEXT_WINDOW_EXCEEDED'
