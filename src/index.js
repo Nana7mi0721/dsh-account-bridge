@@ -95,6 +95,28 @@ const DEFAULTS = {
    * 两半分别验到了什么。
    */
   replay: false,
+  /**
+   * 每账号每分钟最多发几个请求（0 = 不限）。
+   *
+   * 这是**真实存在的**限制，不是防御性编程：OpenRouter 的免费模型是 20 rpm，
+   * 而我们的重试与换号都会额外发请求——一次「重试三轮、换两个账号」的请求在上游
+   * 眼里就是三次。数的是上游收到的包，口径与 magpie 的 `MaxRPM` 一致。
+   *
+   * 默认 0：这个值取决于你的账号与套餐，我们猜的数字挡住的可能是完全正常的用法。
+   * 面板与 `account_bridge_limits` 可以按账号设。
+   */
+  maxRpm: 0,
+  /**
+   * 每账号同时挂着的请求数上限（0 = 不限）。
+   *
+   * 一个 Codex 账号并发五六个以上就会被风控（magpie 里 Lemon 的原话）。并发在我们
+   * 这里不抽象：几个会话、几个子代理、再加上面板点一次「检查」时的一串额度查询，
+   * 很容易同时压在同一个账号上。
+   *
+   * 默认 0，理由同上。**排队不等于失败**：等着的那个请求不会被判成失败、不会去换账号、
+   * 也不会把账号停掉——它只是晚一点发。
+   */
+  maxConcurrency: 0,
 }
 
 /** 取一个可能尚未就绪的服务。 */
@@ -146,6 +168,8 @@ export function apply(ctx, config) {
     affinity,
     affinityMode: settings.affinity,
     replay: settings.replay === true,
+    maxRpm: settings.maxRpm,
+    maxConcurrency: settings.maxConcurrency,
     hold: {
       // 任何一个没配就整组回落默认值——只调一个不等于把另两个清零。
       ...(settings.holdLongestMs === undefined ? {} : { longestMs: settings.holdLongestMs }),

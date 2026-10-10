@@ -256,6 +256,58 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
   })
 
   definitions.push({
+    name: 'account_bridge_limits',
+    description:
+      'Cap how much traffic ONE account may send upstream. `maxRpm` is how many requests that account may send in any ' +
+      '60 seconds; `maxConcurrency` is how many may be out at the vendor at the same time. Both count **every** request ' +
+      'that really goes out — retries, the failover to the next account, and the plugin’s own catalog refreshes too — ' +
+      'because that is what the vendor counts. Pass "0" (or omit the field) to remove the cap and fall back to the ' +
+      'family-level then the global setting. Set this when an upstream risk-controls an account past a few requests a ' +
+      'minute; leave it alone otherwise. A request over the cap is turned away with a Retry-After instead of queueing ' +
+      'forever, and it does NOT cool the account down (nothing was sent).',
+    parameters: compileParameters({
+      account: { type: 'string', required: true, description: 'Account id as shown by account_bridge_accounts, e.g. "codex-1".' },
+      maxRpm: { type: 'string', description: 'Requests per minute for this account. "0" removes the cap.' },
+      maxConcurrency: { type: 'string', description: 'Requests out at the vendor at once. "0" removes the cap.' },
+    }),
+    output: textOutput(),
+    async execute(args) {
+      try {
+        if (!(await store.read(args.account))) return `没有账号 "${args.account}"。`
+        // 只动真的给了的那个键：「没给」= 别管这个字段，「给了 0 / 给了垃圾」= 取消这一项。
+        const keys = ['maxRpm', 'maxConcurrency'].filter((key) => {
+          const raw = args[key]
+          return raw !== undefined && raw !== null && String(raw).trim().length > 0
+        })
+        if (keys.length === 0) return '要改哪一项？给 maxRpm 或 maxConcurrency；给 0 表示取消这一项的上限。'
+        const account = await store.update(args.account, (current) => {
+          const next = { ...current }
+          for (const key of keys) {
+            const value = Number(args[key])
+            if (Number.isFinite(value) && value > 0) next[key] = Math.floor(value)
+            else delete next[key]
+          }
+          return next
+        })
+        adapter.invalidate(account.family)
+        adapter.invalidateHealth()
+        const family = families.find((item) => item.id === account.family)
+        const limits = adapter.limitsFor(family, account)
+        const said = (value) => (value > 0 ? String(value) : '无上限')
+        const lines = [
+          `账号 \`${account.id}\` 的流量上限：一分钟 ${said(limits.rpm)} 次，同时在外 ${said(limits.concurrency)} 个。`,
+          '',
+          '说明：计数的是**真的发出去的每一次**请求，包括重试、换号，以及插件自己刷模型目录的那次。',
+          '没配的字段会回落到族级、再回落到全局设置（在插件的配置里改，改完要重启）。',
+        ]
+        return lines.join('\n')
+      } catch (error) {
+        return `设置失败：${String(error?.message ?? error)}`
+      }
+    },
+  })
+
+  definitions.push({
     name: 'account_bridge_add_endpoint',
     description:
       'Add a `generic` account: any OpenAI- or Anthropic-compatible endpoint (self-hosted vLLM, an intranet gateway, a relay) ' +

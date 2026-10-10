@@ -32,7 +32,15 @@ export const USAGE = [
   '`/pool sticky [auto|session|turn|off]` —— 看/改会话粘性，以及「这段会话为什么粘它」',
   '`/pool sticky forget [族]` —— 丢掉粘性记录（下次重新选号）',
   '`/pool lost` —— 最近一次请求里翻译层丢掉了什么（哪些东西模型没看到）',
+  '`/pool limits [族 账号 [每分钟] [并发]]` —— 看/改某个账号的流量上限（不给数就是看）',
 ].join('\n')
+
+/** 上限是「账号级 / 族级 / 全局」哪一层给的。 */
+const LIMIT_FROM_TEXT = {
+  account: '账号级',
+  family: '族级',
+  global: '全局',
+}
 
 /** 「为什么粘它/不粘」那 11 个裁决说成人话。 */
 export const WHY_TEXT = {
@@ -348,6 +356,95 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
     return { kind: 'success', text: lines.join('\n') }
   }
 
+  /**
+   * `/pool limits` —— 看/改账号级流量上限。
+   *
+   * 四种输入：无参数 = 列全部；`族` = 列这一族；`族 账号` = 列这一个；
+   * `族 账号 每分钟 并发` = 改（给了 0 或垃圾就是「取消这一项」，回到上一级）。
+   * 这里刻意**不显示**凭据、也不发网络请求——上限是本地算的。
+   */
+  async function limitsText(rest) {
+    const [familyToken, accountToken, rpmToken, concurrencyToken] = rest
+    const said = (value) => (Number(value) > 0 ? `${Number(value)}` : '无')
+
+    if (accountToken === undefined) {
+      const wanted = familyToken ? findFamily(families, familyToken) : undefined
+      if (familyToken && !wanted) {
+        return { kind: 'error', text: `没有叫 \`${familyToken}\` 的族。可用：${families.map((item) => item.id).join(' / ')}` }
+      }
+      const lines = ['### 账号的流量上限', '', '| 账号 | 一分钟（次） | 同时在外（个） | 来自 |', '|---|---|---|---|']
+      let total = 0
+      for (const row of await adapter.status()) {
+        if (wanted && row.family !== wanted.id) continue
+        const family = families.find((item) => item.id === row.family)
+        for (const account of row.accounts) {
+          const limits = adapter.limitsFor(family, account)
+          total += 1
+          lines.push(`| \`${account.id}\` | ${said(limits.rpm)} | ${said(limits.concurrency)} | ${LIMIT_FROM_TEXT[limits.from] ?? limits.from} |`)
+        }
+      }
+      if (total === 0) {
+        lines.push('| — | — | — | — |')
+        lines.push('')
+        lines.push('一个账号都没有。')
+        return { kind: 'success', text: lines.join('\n') }
+      }
+      lines.push('')
+      lines.push('「无」= 这个账号没有上限。**上限不是必须的**：只在某一家的风控会因为你发太快而拒绝时才要配。')
+      lines.push('改一个：`/pool limits codex codex-1 5 2`（一分钟 5 次、同时最多 2 个）。')
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    const family = findFamily(families, familyToken)
+    if (!family) {
+      return { kind: 'error', text: `没有叫 \`${familyToken}\` 的族。可用：${families.map((item) => item.id).join(' / ')}。用法：\`/pool limits <族> <账号> [每分钟] [并发]\`` }
+    }
+    const account = await store.read(accountToken)
+    if (!account || account.family !== family.id) {
+      return { kind: 'error', text: `\`${family.id}\` 里没有账号 \`${accountToken}\`。用 \`/pool limits\` 看现有的。` }
+    }
+
+    const given = [rpmToken, concurrencyToken].filter((token) => token !== undefined)
+    const lines = [`### \`${account.id}\` 的流量上限`]
+    if (given.length === 0) {
+      const limits = adapter.limitsFor(family, account)
+      lines.push('')
+      lines.push(`- 一分钟：**${said(limits.rpm)}** 次（${LIMIT_FROM_TEXT[limits.from] ?? limits.from}）`)
+      lines.push(`- 同时在外：**${said(limits.concurrency)}** 个（${LIMIT_FROM_TEXT[limits.from] ?? limits.from}）`)
+      lines.push('')
+      lines.push(`改它：\`/pool limits ${account.family} ${account.id} 5 2\`；取消：把数字写成 0。`)
+      return { kind: 'success', text: lines.join('\n') }
+    }
+
+    const wanted = { maxRpm: rpmToken, maxConcurrency: concurrencyToken }
+    const changed = []
+    const next = await store.update(account.id, (current) => {
+      const copy = { ...current }
+      for (const [key, raw] of Object.entries(wanted)) {
+        if (raw === undefined) continue
+        const value = Number(raw)
+        if (Number.isFinite(value) && value > 0) {
+          copy[key] = Math.floor(value)
+          changed.push(`${key === 'maxRpm' ? '一分钟' : '同时在外'} → ${copy[key]}`)
+        } else {
+          delete copy[key]
+          changed.push(`${key === 'maxRpm' ? '一分钟' : '同时在外'} → 无上限`)
+        }
+      }
+      return copy
+    })
+    adapter.invalidate(family.id)
+    adapter.invalidateHealth()
+    const limits = adapter.limitsFor(family, next ?? account)
+    lines.push('')
+    for (const line of changed) lines.push(`- ${line}`)
+    lines.push('')
+    lines.push(`现在：一分钟 ${said(limits.rpm)} 次 / 同时在外 ${said(limits.concurrency)} 个（${LIMIT_FROM_TEXT[limits.from] ?? limits.from}）。`)
+    lines.push('')
+    lines.push('计数的是**真的发出去的每一次**请求，包括重试、换号，以及插件自己刷模型目录的那次。超上限会被立刻拒绝并带 `Retry-After`，**不会**把账号冷却掉。')
+    return { kind: 'success', text: lines.join('\n') }
+  }
+
   async function handler({ rawInput }) {
     const [verb, ...rest] = splitInput(rawInput)
     try {
@@ -366,6 +463,9 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
         case 'lost':
         case 'diagnostics':
           return await lostText()
+        case 'limits':
+        case 'rpm':
+          return await limitsText(rest)
         default:
           return { kind: 'error', text: `不认识的子命令 \`${verb}\`。\n\n${USAGE}` }
       }
@@ -377,8 +477,8 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
 
   return {
     name: COMMAND_NAME,
-    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号、看会话粘性与翻译损失',
-    input: { hint: '[status|check|unfreeze|sticky|lost] [族] [账号]' },
+    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号、看会话粘性、流量上限与翻译损失',
+    input: { hint: '[status|check|unfreeze|sticky|lost|limits] [族] [账号]' },
     handler,
   }
 }

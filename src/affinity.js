@@ -79,6 +79,9 @@ export const WHY_VALUES = [
   'gone',
   'resting',
   'spent',
+  // 这一分钟里它没余量了（W10 的闸门），所以让位给了别人。与 `spent` 不同：
+  // `spent` 说的是额度快用完了，这个是「现在这个瞬间发不出去」。
+  'full',
   'session',
   'turn',
   'sticky-miss',

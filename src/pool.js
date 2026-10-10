@@ -27,6 +27,7 @@ import {
 } from './affinity.js'
 import { SPENT_SHARE, decayUsage, rankCandidates, shareOf, usageNow } from './select.js'
 import { Diagnostics } from './wire/diagnostics.js'
+import { Gate } from './gate.js'
 import { redact } from './util.js'
 
 /** 池装配的缓存时长：`owns()` 每次选模型都会跑，而装配要碰目录与账号存储。 */
@@ -50,6 +51,17 @@ const WHY_LIMIT = 1000
  * 真机验收时就是这么被绊了一下的。
  */
 const LOST_BOOKS_KEPT = 8
+
+/**
+ * 一个账号在闸门里的身份：`<族>/<账号>`。
+ *
+ * **不是模型**：限额是账号级的（同一个账号的两个模型共用一份额度），这和冷却表
+ * 按 `(族, 账号, 模型)` 分格是两件事——那边分的是「哪个模型用不了了」，这边分的是
+ * 「这个账号一分钟能发几个包」。
+ */
+export function whoOf(family, accountId) {
+  return `${family?.id ?? family}/${accountId}`
+}
 
 /*
  * 换号窗口的三个上限（语义照 magpie `internal/gateway/fallback.go` 的
@@ -169,8 +181,13 @@ export class AccountBridgeAdapter {
   #sunk = new Map()
   #sunkSeq = 0
   #hold
+  /** 流量闸门（W10）：每分钟请求数与并发数。 */
+  #gate
+  /** 全局默认限额（配置项），账号记录与族可以各自覆盖。 */
+  #maxRpm
+  #maxConcurrency
 
-  constructor({ ctx, store, health, families, log, hold, affinity, affinityMode, replay }) {
+  constructor({ ctx, store, health, families, log, hold, affinity, affinityMode, replay, gate, maxRpm, maxConcurrency }) {
     this.#ctx = ctx
     this.#store = store
     this.#health = health
@@ -180,6 +197,29 @@ export class AccountBridgeAdapter {
     this.#affinity = affinity ?? new AffinityBook({ log })
     this.#affinityMode = normaliseMode(affinityMode)
     this.#replay = replay === true
+    this.#gate = gate ?? new Gate()
+    this.#maxRpm = Number(maxRpm) > 0 ? Number(maxRpm) : 0
+    this.#maxConcurrency = Number(maxConcurrency) > 0 ? Number(maxConcurrency) : 0
+  }
+
+  /**
+   * 一个账号此刻的限额：账号记录 > 族 > 全局默认。
+   *
+   * 账号级是**具体**的（这一族的这个号是免费档，20 rpm），族级是**这一类**的
+   * （Qoder 的每个号都算同一个人的额度），全局是兜底。
+   */
+  limitsFor(family, account) {
+    const pick = (value) => (Number(value) > 0 ? Number(value) : 0)
+    return {
+      rpm: pick(account?.maxRpm) || pick(family?.maxRpm) || this.#maxRpm,
+      concurrency:
+        pick(account?.maxConcurrency) || pick(family?.maxConcurrency) || this.#maxConcurrency,
+    }
+  }
+
+  /** 闸门本体（面板与命令族要看它）。 */
+  get gate() {
+    return this.#gate
   }
 
   /** 会话亲和那本账（`index.js` 在 `storageDomain` 就绪后把表接上去）。 */
@@ -361,11 +401,22 @@ export class AccountBridgeAdapter {
     }
     const accounts = (await this.#store.list(family.id)).filter((account) => account.disabled !== true)
     const entries = []
+    /**
+     * 目录读不出来的账号。
+     *
+     * **「读不出来」不是「什么都没有」**（`LESSONS.md` 第 9 条）。原来的写法是失败就
+     * 当空目录，于是这个账号的全部模型从选择器里消失——而调用方得到的解释是
+     * 「没有账号提供这个模型」，一句假话。更要紧的是 `#askUpstream`（W10）之后这件事
+     * 会**由我们自己触发**：这一分钟的名额用满时目录刷新被闸门转开，账号就凭空没了模型。
+     * 所以把失败记下来，在「一个候选都没有」的那条路上说出来。
+     */
+    const degraded = []
     for (const account of accounts) {
       let models = []
       try {
         models = await this.#catalog(family, account, signal)
       } catch (error) {
+        degraded.push({ account, error })
         this.#log?.warn?.('account-bridge: catalog for %s failed: %s', account.id, redact(String(error?.message ?? error)))
       }
       for (const model of models) {
@@ -381,9 +432,34 @@ export class AccountBridgeAdapter {
     }
     // 额度是后台尽力而为读来的：**装配与选择都不为它等待**。
     this.#refreshAllowances(family, accounts)
-    const value = { family, accounts, entries, models }
+    const value = { family, accounts, entries, models, degraded }
     this.#pools.set(key, { at: now, value, generation: this.#health.generation })
     return value
+  }
+
+  /**
+   * 池子**自己**向上游发的那些请求（目录、额度）也要过闸门。
+   *
+   * 这是 magpie 的口径，也是唯一说得通的：上游数的是它收到的包，不区分那是一次用户
+   * 消息还是我们刷目录的那一次。少了这一层，「面板点一次检查」会在二十个账号上同时
+   * 打出二十个包，而闸门一个都没数到——那正是这个限制要防的形状。
+   *
+   * 与真实请求不同的是**不等**（`waitMs: 1` / `longestMs: 1`）：目录有旧快照可以回落、
+   * 额度读不到就显示「未知」，两者都不值得让用户等两分钟。没余量就当场转开，由调用方
+   * 决定「这次不问」怎么办。转开**不罚账号**（`classifyFailure` 对 `LOCAL_RATE_LIMIT`
+   * 给的是 `action:'throw'`，不产生冷却）。
+   */
+  async #askUpstream(family, account, signal, ask) {
+    const who = whoOf(family, account.id)
+    const limit = this.limitsFor(family, account)
+    let release
+    try {
+      release = await this.#gate.acquire({ who, limit: limit.concurrency, signal, waitMs: 1 })
+      await this.#gate.waitForRoom({ who, limit: limit.rpm, signal, longestMs: 1 })
+      return await ask()
+    } finally {
+      release?.()
+    }
   }
 
   /** 单账号的模型目录（带缓存，失败回退到上一次成功的快照）。 */
@@ -394,7 +470,10 @@ export class AccountBridgeAdapter {
     if (cached && now - cached.at < CATALOG_TTL_MS) return cached.models
     const payload = await this.#freshPayload(family, account)
     try {
-      const models = (await family.listModels(this.#ctx, payload, signal)) ?? []
+      const models =
+        (await this.#askUpstream(family, account, signal, () =>
+          family.listModels(this.#ctx, payload, signal),
+        )) ?? []
       this.#catalogs.set(key, { at: now, models })
       return models
     } catch (error) {
@@ -521,7 +600,9 @@ export class AccountBridgeAdapter {
       if (this.#allowanceInflight.has(key)) continue
       const task = (async () => {
         const payload = await this.#freshPayload(family, account)
-        const windows = await family.quota(this.#ctx, payload, undefined)
+        const windows = await this.#askUpstream(family, account, undefined, () =>
+          family.quota(this.#ctx, payload, undefined),
+        )
         if (Array.isArray(windows)) this.#allowances.set(key, { at: Date.now(), windows })
         this.#allowanceRetryAt.delete(key)
       })()
@@ -664,8 +745,20 @@ export class AccountBridgeAdapter {
     const pool = await this.#pool(family, options.signal)
     const candidates = pool.entries.filter((entry) => entry.modelId === model)
     if (candidates.length === 0) {
-      const error = new Error(`account-bridge: no ${family.id} account offers model "${model}"`)
-      error.code = pool.accounts.length === 0 ? 'MISSING_CREDENTIAL' : 'NO_ADAPTER'
+      // 「一个候选都没有」有三种完全不同的原因，不能都报成同一句话。
+      const first = pool.degraded[0]
+      const blind = pool.accounts.length > 0 && pool.degraded.length === pool.accounts.length
+      const detail = blind
+        ? `读不出模型目录（${first?.error?.message ?? first?.error}），所以无法确定它有没有 "${model}"`
+        : pool.degraded.length > 0
+          ? `读得出目录的账号里没有一个提供 "${model}"；另有 ${pool.degraded.length} 个账号的目录读不出来，所以这不一定是全部`
+          : `没有账号提供 "${model}"`
+      const error = new Error(`account-bridge: ${family.id} ${detail}`)
+      error.code = blind
+        ? (first?.error?.code ?? 'NO_ADAPTER')
+        : pool.accounts.length === 0
+          ? 'MISSING_CREDENTIAL'
+          : 'NO_ADAPTER'
       throw error
     }
 
@@ -686,7 +779,7 @@ export class AccountBridgeAdapter {
       ready.map((entry) => this.#candidateOf(family, entry, now)),
       now,
     )
-    const ordered = ranked.order.map((candidate) => candidate.entry)
+    let ordered = ranked.order.map((candidate) => candidate.entry)
     // 冷却中的排最后，但**永不剔除**：前面的全都试完了，照样试它一次。
     for (const candidate of candidates) {
       if (!ordered.includes(candidate)) ordered.push(candidate)
@@ -727,7 +820,26 @@ export class AccountBridgeAdapter {
       ordered.unshift(kept)
     }
 
+    // 流量闸门（W10）：这一分钟里**没余量**的账号让位给有余量的同族账号，
+    // 而不是让整段请求干等——「排队排不下」不该表现成用户看见的卡顿。
+    // 这一步在粘性**之后**：粘住是「上次它答过、缓存值钱」，而没余量是**现在**发不出去，
+    // 后者更硬（magpie 原文：a key or account with no room in the minute gives way）。
+    const limits = new Map(ordered.map((c) => [c.account.id, this.limitsFor(family, c.account)]))
+    const now2 = Date.now()
+    const roomy = ordered.filter((c) => this.#gate.rpmFree(whoOf(family, c.account.id), limits.get(c.account.id).rpm, now2))
+    if (roomy.length > 0 && roomy.length < ordered.length) {
+      const moved = ordered.filter((c) => !roomy.includes(c))
+      // 被挪走的第一个如果正是粘住的那个，`lastWhy` 就得说实话——否则那段会话上
+      // 写着「sticky-hit」，而实际派出去的是另一个账号。
+      if (stickyKey !== undefined && moved[0] === ordered[0]) {
+        const entry = this.#lastWhy.get(stickyKey)
+        if (entry) this.#lastWhy.set(stickyKey, { ...entry, why: 'full' })
+      }
+      ordered = [...roomy, ...moved]
+    }
+
     let lastError
+    let turnedAwayError
     for (const [index, candidate] of ordered.entries()) {
       const accountId = candidate.account.id
       const pending = []
@@ -761,8 +873,16 @@ export class AccountBridgeAdapter {
         pendingBytes = 0
         return buffered
       }
+      let release
       try {
         const payload = await this.#freshPayload(family, candidate.account)
+        const limit = limits.get(accountId) ?? this.limitsFor(family, candidate.account)
+        const who = whoOf(family, accountId)
+        // **先拿并发槽，临发送前才等分钟余量**（W10，语义照 magpie）：
+        // 反过来先等分钟的写法统计的是「打算发」——一个卡在并发队列里的请求会白占掉
+        // 一分钟里的一个位置，而它可能几秒后才真的出去。
+        release = await this.#gate.acquire({ who, limit: limit.concurrency, signal: options.signal })
+        await this.#gate.waitForRoom({ who, limit: limit.rpm, signal: options.signal })
         const iterator = family
           .stream(this.#ctx, {
             payload,
@@ -867,6 +987,24 @@ export class AccountBridgeAdapter {
         }
         return
       } catch (error) {
+        // 调用方走了就不再试下一个账号：那正是最该立刻停下的时刻。
+        if (options.signal?.aborted) throw error
+        if (error?.code === 'LOCAL_RATE_LIMIT') {
+          // 我们自己的闸门转开的：**包没出去，账号没毛病**，换一个有余量的再试。
+          // 全都发不出去时，报「最快能发的那个」——它的 `Retry-After` 才有意义。
+          if (!turnedAwayError || (error.afterMs ?? Infinity) < (turnedAwayError.afterMs ?? Infinity)) {
+            turnedAwayError = error
+          }
+          lastError = error
+          this.#log?.info?.(
+            'account-bridge: %s/%s turned away by the gate (%s), %s',
+            family.id,
+            accountId,
+            error.kind,
+            index + 1 < ordered.length ? 'trying an account with room' : 'no account has room',
+          )
+          continue
+        }
         lastError = error
         const verdict = classifyFailure(error, family.id)
         const recorded = this.#health.record(family.id, accountId, model, verdict)
@@ -886,9 +1024,12 @@ export class AccountBridgeAdapter {
         )
         if (committed || verdict.action === 'throw') throw error
         if (index + 1 >= ordered.length) throw error
+      } finally {
+        // 槽位要在**这一轮真的结束之后**才还：流读完、报错、或者调用方走了。
+        release?.()
       }
     }
-    throw lastError ?? new Error('account-bridge: no account could serve this request')
+    throw turnedAwayError ?? lastError ?? new Error('account-bridge: no account could serve this request')
   }
 
   // -------------------------------------------------------------- 其它
@@ -909,6 +1050,8 @@ export class AccountBridgeAdapter {
           externallyOwned: account.externallyOwned === true,
           disabled: account.disabled === true,
           expiresAt: account.auth?.expiresAt,
+          maxRpm: account.maxRpm,
+          maxConcurrency: account.maxConcurrency,
           cooldown: this.#health.why(family.id, account.id, '*'),
         })),
       })

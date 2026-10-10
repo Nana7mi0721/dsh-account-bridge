@@ -226,6 +226,53 @@ test('proxy is set and cleared, and clearing actually removes the key', async ()
   }
 })
 
+test('limits are set per account, and zero means "back to the one above"', async () => {
+  const host = createMockHost()
+  try {
+    await seedAccount(host, 'codex-1')
+    const set = await callApi(host, 'limits', { account: 'codex-1', maxRpm: 3, maxConcurrency: 2 })
+    assert.deepEqual(set.body.value.limits, { rpm: 3, concurrency: 2 })
+
+    let stored = await host.services.credentials.readRecord('dsh-account-bridge/codex-1')
+    assert.equal(stored.payload.maxRpm, 3)
+    assert.equal(stored.payload.maxConcurrency, 2)
+
+    // 0 / 负数 / 不是数：一律当作「回到上一级」，把键删掉而不是留个 0
+    // （留个 0 会让 `limitsFor` 的 `Number(value) > 0` 判成「没配」——现在看着一样，
+    //   但记录里多一个 0 会让面板显示「已配 0 次」，那是另一回事）。
+    const cleared = await callApi(host, 'limits', { account: 'codex-1', maxRpm: 0 })
+    assert.deepEqual(cleared.body.value.limits, { rpm: 0, concurrency: 2 })
+    stored = await host.services.credentials.readRecord('dsh-account-bridge/codex-1')
+    assert.ok(!('maxRpm' in stored.payload), 'zero must delete the key, not store a zero')
+
+    const junk = await callApi(host, 'limits', { account: 'codex-1', maxConcurrency: 'lots' })
+    stored = await host.services.credentials.readRecord('dsh-account-bridge/codex-1')
+    assert.ok(!('maxConcurrency' in stored.payload), 'junk is not a limit')
+    assert.deepEqual(junk.body.value.limits, { rpm: 0, concurrency: 0 })
+  } finally {
+    host.dispose()
+  }
+})
+
+test('state says which limits are actually in force, and where they come from', async () => {
+  const host = createMockHost()
+  const find = (state) => state.body.value.families.flatMap((f) => f.accounts).find((a) => a.id === 'codex-1')
+  try {
+    await seedAccount(host, 'codex-1')
+    // 没配就是「没有上限」，而且要说清楚这不是账号级的——只回账号自己那个字段，
+    // 用户会以为「填了才有限制」，于是明明被族级限着却查不出来。
+    assert.deepEqual(find(await callApi(host, 'state')).limits, { rpm: 0, concurrency: 0, from: 'global' })
+
+    await callApi(host, 'limits', { account: 'codex-1', maxRpm: 4 })
+    const row = find(await callApi(host, 'state'))
+    assert.equal(row.limits.rpm, 4)
+    assert.equal(row.limits.from, 'account')
+    assert.equal(row.maxRpm, 4, 'the raw account-level value is there too')
+  } finally {
+    host.dispose()
+  }
+})
+
 test('remove deletes exactly one account and reports 404 for strangers', async () => {
   const host = createMockHost()
   try {
@@ -383,6 +430,46 @@ test('check asks the upstream for quota and degrades to undefined when it throws
     assert.ok(row)
     // generic 没有 quota()，所以这一行是 undefined——面板显示「未知」。
     assert.equal(row.accounts[0].quota, undefined)
+  } finally {
+    host.dispose()
+  }
+})
+
+test('the gate action reports what the gate is actually counting', async () => {
+  const host = createMockHost()
+  try {
+    await seedAccount(host, 'generic-1', {
+      maxRpm: 1,
+      maxConcurrency: 2,
+      auth: { baseUrl: 'http://127.0.0.1:9/v1', apiKey: 'sk-x' },
+    })
+    // 空的时候是空的：没走过流量的账号不该在面板上凭空出现（幽灵行）。
+    const before = await callApi(host, 'gate')
+    assert.equal(before.status, 200)
+    assert.deepEqual(before.body.value.rows, [])
+
+    // 让一条请求穿过闸门。端口 9 上不会有东西答应，所以这一条注定失败——
+    // 但**闸门的记账发生在请求发出去之前**，这正是我们要看的那一步。
+    const adapter = host.services.llm.routes.get('acct-generic')
+    assert.ok(adapter, 'expected the generic route to be registered')
+    try {
+      for await (const _chunk of adapter.stream({
+        provider: 'acct-generic',
+        model: 'mock-alpha',
+        messages: [{ id: 'u1', role: 'user', content: [{ type: 'text', text: 'hi' }] }],
+      })) {
+        break
+      }
+    } catch {
+      // 上游连不上是预期的。
+    }
+
+    const after = await callApi(host, 'gate')
+    const row = after.body.value.rows.find((item) => item.who === 'generic/generic-1')
+    assert.ok(row, `expected a gate row for generic/generic-1, got ${JSON.stringify(after.body.value.rows)}`)
+    assert.equal(row.rpmLimit, 1)
+    assert.equal(row.rpm, 1)
+    assert.equal(row.laneLimit, 2)
   } finally {
     host.dispose()
   }

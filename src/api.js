@@ -62,6 +62,9 @@ export function publicAccount(account, extra = {}) {
     externallyOwned: account?.externallyOwned === true,
     disabled: account?.disabled === true,
     proxy: typeof account?.proxy === 'string' && account.proxy.length > 0 ? account.proxy : undefined,
+    /** 账号级的流量上限（没配就是 undefined，面板回落到族级/全局值）。 */
+    maxRpm: Number(account?.maxRpm) > 0 ? Number(account.maxRpm) : undefined,
+    maxConcurrency: Number(account?.maxConcurrency) > 0 ? Number(account.maxConcurrency) : undefined,
     createdAt: account?.createdAt,
     updatedAt: account?.updatedAt,
     /** 凭据是否带 refresh token——面板据此显示「可续期 / 需重新登录」。 */
@@ -215,7 +218,33 @@ export function registerAccountBridgeRoutes(options) {
         if (withQuota && payload && row.disabled !== true) {
           quota = await quotaOf(family, payload, ctx)
         }
-        accounts.push(publicAccount({ ...payload, ...row }, { quota, status: row.cooldown ? 'cooling' : 'ready' }))
+        accounts.push(
+          publicAccount(
+            { ...payload, ...row },
+            {
+              quota,
+              status: row.cooldown ? 'cooling' : 'ready',
+              /**
+               * **实际生效**的两个上限，以及它们是从哪一级来的。
+               *
+               * 面板要能回答「这个账号一分钟最多发几次」，而这个答案不总是写在这个账号上：
+               * 账号级 > 族级 > 全局默认。只回账号自己那个字段，用户会以为「填了才有限制」，
+               * 于是明明被族级限着却查不出来。
+               */
+              limits: payload
+                ? {
+                    ...adapter.limitsFor(family, payload),
+                    from:
+                      Number(payload.maxRpm) > 0 || Number(payload.maxConcurrency) > 0
+                        ? 'account'
+                        : Number(family?.maxRpm) > 0 || Number(family?.maxConcurrency) > 0
+                          ? 'family'
+                          : 'global',
+                  }
+                : undefined,
+            },
+          ),
+        )
       }
       out.push({
         family: pool.family,
@@ -269,6 +298,17 @@ export function registerAccountBridgeRoutes(options) {
      */
     async diagnostics() {
       return adapter.diagnostics?.() ?? { requests: 0, lostRequests: 0, entries: [], summary: {}, hasErrors: false, dropped: 0 }
+    },
+
+    /**
+     * 闸门此刻的现场（W10）：每个账号这一分钟里占了几格、上限多少、车道有几个在飞。
+     *
+     * 与 `/pool limits` 看到的**不是同一件事**：那一条读的是「配置了什么」，这一条读的是
+     * 「闸门真的在按什么算」。两者不一致时（配置写了 1、这里却是 0）说明限额没走到池子
+     * 那一层——那正是最需要一眼看出来的时刻。
+     */
+    async gate() {
+      return { rows: adapter.gate?.snapshot?.() ?? [] }
     },
 
     /**
@@ -360,6 +400,34 @@ export function registerAccountBridgeRoutes(options) {
       adapter.invalidate(family.id)
       adapter.invalidateHealth()
       return { account: account.id, proxy: raw.length > 0 ? raw : undefined }
+    },
+
+    /**
+     * 给一个账号单独配流量上限（W10）。`0` / 省略 / null 都表示「回到上一级」。
+     *
+     * 与 `proxy` 一样是按 payload 生效的，所以池缓存与健康表都要作废——限额一变，
+     * 「谁有余量」的答案就变了，而那个答案被缓存在 `#pools` 里。
+     */
+    async limits(body) {
+      const { family, account } = await locate(body.account)
+      const read = (value) => (Number(value) > 0 ? Math.floor(Number(value)) : undefined)
+      // **只动 body 里真的给了的那个键。** 「没给」与「给了 0」是两件事：
+      // 前者是「这个字段别管」，后者是「取消这一项，回到上一级」。要是把「没给」
+      // 也当成后者，改一个上限就会把另一个悄悄清掉。
+      const keys = ['maxRpm', 'maxConcurrency'].filter((key) => Object.hasOwn(body, key))
+      await amend(account, (current) => {
+        const next = { ...current }
+        for (const key of keys) {
+          const value = read(body[key])
+          if (value === undefined) delete next[key]
+          else next[key] = value
+        }
+        return next
+      })
+      adapter.invalidate(family.id)
+      adapter.invalidateHealth()
+      const payload = await store.read(account.id)
+      return { account: account.id, limits: adapter.limitsFor(family, payload ?? account) }
     },
 
     /** 扫本机客户端登录态，只报告，不改动任何东西。 */

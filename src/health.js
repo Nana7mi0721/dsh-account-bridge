@@ -104,6 +104,12 @@ export function classifyFailure(error, family, facts = {}) {
   if (code === 'AUTH' || code === 'INVALID_CREDENTIAL' || code === 'MISSING_CREDENTIAL') {
     return { action: 'switch', reason: code, cooldownMs: COOLDOWN.auth, scope: 'account' }
   }
+  if (code === 'LOCAL_RATE_LIMIT') {
+    // 我们自己的流量闸门（W10）转开的：**包根本没出去**，所以谁也不罚。
+    // 判成 `RATE_LIMIT` 会把一个完全健康的账号停掉，那是在冤枉它——而且下一次
+    // 请求照样会被同一个闸门挡住，停账号只是把「排队排不下」伪装成「上游限流了」。
+    return { action: 'throw', reason: 'LOCAL_RATE_LIMIT' }
+  }
   // `NOT_AN_API_REPLY` 必须落在这里，而不是靠状态码。挡在中间的东西（Cloudflare 挑战页、
   // 网关登录页）常常回 403，而 403 在下面那条规则里等于 AUTH ⇒ 账号被冷 24 小时。
   // 「中间有个东西挡着」跟「这个账号的令牌废了」是两件事，前者换号就好、一分钟后再试。

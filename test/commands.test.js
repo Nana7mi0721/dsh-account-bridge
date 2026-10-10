@@ -44,8 +44,8 @@ const FAMILIES = [
  * 方法都记下调用。`unfreeze` 不假装成功——它返回一个我们指定的条数，
  * 让「本来就没有冷却」与「清掉了 N 条」这两条分支都能被测到。
  */
-function fakeAdapter({ rows = [], health = new Map(), unfreezeReturns = 0 } = {}) {
-  const calls = { status: 0, healthOf: [], unfreeze: [] }
+function fakeAdapter({ rows = [], health = new Map(), unfreezeReturns = 0, limits } = {}) {
+  const calls = { status: 0, healthOf: [], unfreeze: [], limitsFor: [], invalidate: [] }
   return {
     calls,
     async status() {
@@ -60,17 +60,57 @@ function fakeAdapter({ rows = [], health = new Map(), unfreezeReturns = 0 } = {}
       calls.unfreeze.push([family, accountId])
       return typeof unfreezeReturns === 'function' ? unfreezeReturns(family, accountId) : unfreezeReturns
     },
+    limitsFor(family, acc) {
+      calls.limitsFor.push(acc?.id ?? acc)
+      if (limits) return limits(family, acc)
+      // 默认与真实现同形：账号级 > 族级 > 全局，都没配就是 0（= 不限）。
+      const rpm = Number(acc?.maxRpm) > 0 ? Number(acc.maxRpm) : Number(family?.maxRpm) > 0 ? Number(family.maxRpm) : 0
+      const concurrency =
+        Number(acc?.maxConcurrency) > 0
+          ? Number(acc.maxConcurrency)
+          : Number(family?.maxConcurrency) > 0
+            ? Number(family.maxConcurrency)
+            : 0
+      const from =
+        Number(acc?.maxRpm) > 0 || Number(acc?.maxConcurrency) > 0
+          ? 'account'
+          : Number(family?.maxRpm) > 0 || Number(family?.maxConcurrency) > 0
+            ? 'family'
+            : 'global'
+      return { rpm, concurrency, from }
+    },
+    invalidate(familyId) {
+      calls.invalidate.push(familyId)
+    },
+    invalidateHealth() {
+      calls.invalidate.push('*')
+    },
   }
 }
 
-/** 假的 AccountStore：只需要 `list()`。 */
+/** 假的 AccountStore：`list()` 给命令用，`read()`/`update()` 给改上限用。 */
 function fakeStore(byFamily = {}) {
   const calls = []
+  const records = new Map()
+  for (const list of Object.values(byFamily)) for (const item of list) records.set(item.id, item)
   return {
     calls,
+    records,
+    updates: [],
     async list(familyId) {
       calls.push(familyId)
       return byFamily[familyId] ?? []
+    },
+    async read(id) {
+      return records.get(id)
+    },
+    async update(id, mutate) {
+      const current = records.get(id)
+      if (!current) return undefined
+      const next = mutate(current)
+      this.updates.push(id)
+      if (next !== undefined) records.set(id, next)
+      return next
     },
   }
 }
@@ -518,4 +558,73 @@ test('/pool lost says so when no request has gone through yet', async () => {
   }
   const after = await run(makeCommand({ adapter: quiet }), 'lost')
   assert.match(after.text, /最近 \*\*4\*\* 次请求\*\*什么都没丢\*\*/)
+})
+
+// ---------------------------------------------------------------- 流量上限（W10）
+
+const LIMIT_ROWS = [
+  {
+    family: 'codex',
+    displayName: 'ChatGPT (Codex)',
+    route: 'acct-codex',
+    accounts: [account('codex-1'), account('codex-2', { maxRpm: 5, maxConcurrency: 2 })],
+  },
+]
+
+test('/pool limits lists every account and says where each cap comes from', async () => {
+  const adapter = fakeAdapter({ rows: LIMIT_ROWS })
+  const result = await run(makeCommand({ adapter }), 'limits')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /codex-1` \| 无 \| 无 \| 全局 \|/)
+  assert.match(result.text, /codex-2` \| 5 \| 2 \| 账号级 \|/)
+  assert.equal(adapter.calls.status, 1, 'looking must not reach the network')
+})
+
+test('/pool limits with a family that does not exist names the ones that do', async () => {
+  const result = await run(makeCommand(), 'limits nope')
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /没有叫 `nope` 的族/)
+})
+
+test('/pool limits 族 账号 without numbers reports what is in force', async () => {
+  const store = fakeStore({ codex: [account('codex-1', { maxRpm: 9 })] })
+  const adapter = fakeAdapter({ rows: LIMIT_ROWS })
+  const result = await run(makeCommand({ adapter, store }), 'limits codex codex-1')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /一分钟：\*\*9\*\* 次/)
+  assert.match(result.text, /同时在外：\*\*无\*\* 个/)
+  assert.deepEqual(store.updates, [], 'looking must not write')
+})
+
+test('/pool limits 族 账号 每分钟 并发 writes the cap and drops the pool cache', async () => {
+  const store = fakeStore({ codex: [account('codex-1')] })
+  const adapter = fakeAdapter({ rows: LIMIT_ROWS })
+  const result = await run(makeCommand({ adapter, store }), 'limits codex codex-1 5 2')
+  assert.equal(result.kind, 'success')
+  assert.deepEqual(store.updates, ['codex-1'])
+  assert.equal(store.records.get('codex-1').maxRpm, 5)
+  assert.equal(store.records.get('codex-1').maxConcurrency, 2)
+  // 不失效缓存的话，旧上限会一直生效到下次重启——用户会以为命令没起作用。
+  assert.deepEqual(adapter.calls.invalidate, ['codex', '*'])
+  assert.match(result.text, /一分钟 → 5/)
+  assert.match(result.text, /现在：一分钟 5 次 \/ 同时在外 2 个/)
+})
+
+test('a zero or a junk number removes the cap instead of storing a zero', async () => {
+  const store = fakeStore({ codex: [account('codex-1', { maxRpm: 5, maxConcurrency: 2 })] })
+  const adapter = fakeAdapter({ rows: LIMIT_ROWS })
+  const result = await run(makeCommand({ adapter, store }), 'limits codex codex-1 0 lots')
+  assert.equal(result.kind, 'success')
+  assert.ok(!('maxRpm' in store.records.get('codex-1')), 'zero must delete the key, not store a zero')
+  assert.ok(!('maxConcurrency' in store.records.get('codex-1')), 'junk is not a cap either')
+  assert.match(result.text, /一分钟 → 无上限/)
+})
+
+test('/pool limits refuses an account that belongs to another family, and writes nothing', async () => {
+  const store = fakeStore({ codex: [account('codex-1')] })
+  const adapter = fakeAdapter({ rows: LIMIT_ROWS })
+  const result = await run(makeCommand({ adapter, store }), 'limits claude codex-1')
+  assert.equal(result.kind, 'error')
+  assert.match(result.text, /没有账号/)
+  assert.deepEqual(store.updates, [])
 })

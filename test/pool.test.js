@@ -5,7 +5,8 @@ import { createMockHost } from './harness.js'
 import { AccountStore } from '../src/store.js'
 import { createMemoryCredentials } from './harness.js'
 import { CooldownTable } from '../src/health.js'
-import { AccountBridgeAdapter } from '../src/pool.js'
+import { AccountBridgeAdapter, whoOf } from '../src/pool.js'
+import { Gate } from '../src/gate.js'
 import { FAMILIES, familyIds } from '../src/families/registry.js'
 
 const silent = { info() {}, warn() {}, error() {}, debug() {} }
@@ -46,7 +47,7 @@ function makeFamily(overrides = {}) {
   return family
 }
 
-async function makeAdapter(family, accountIds) {
+async function makeAdapter(family, accountIds, options = {}) {
   const credentials = createMemoryCredentials()
   const store = new AccountStore(credentials, silent)
   for (const id of accountIds) {
@@ -59,7 +60,14 @@ async function makeAdapter(family, accountIds) {
     })
   }
   const health = new CooldownTable()
-  const adapter = new AccountBridgeAdapter({ ctx: { fetch: async () => { throw new Error('no fetch') }, log: silent, config: {} }, store, health, families: [family], log: silent })
+  const adapter = new AccountBridgeAdapter({
+    ctx: { fetch: async () => { throw new Error('no fetch') }, log: silent, config: {} },
+    store,
+    health,
+    families: [family],
+    log: silent,
+    ...options,
+  })
   return { adapter, health, store }
 }
 
@@ -566,4 +574,247 @@ test('the loss book remembers the last few requests, newest loss first', async (
   assert.equal(fresh.requests, 8)
   assert.equal(fresh.lostRequests, 1)
   assert.equal(fresh.entries[0].code, 'IMAGE_WITHOUT_DATA')
+})
+
+// --------------------------------------------------- 流量闸门（W10）接进池子
+
+/**
+ * 闸门在池子里的位置是**关键**的，这里有五条必须成立：
+ * ① 这一分钟没余量的账号**让位**给有余量的同族账号（而不是让整段请求干等）；
+ * ② 全部都没余量时报一个带 `Retry-After` 的错，而不是永远等下去；
+ * ③ 被闸门转开**不是上游拒绝**，账号一点都不该被冷却；
+ * ④ 调用方走了就不再试下一个账号，而且**位置要还回去**；
+ * ⑤ 并发槽在整段流读完之前一直握着。
+ *
+ * 算账之前先 `listModels()` 暖一次目录：刷目录**也是**一次请求
+ * （最后一条用例专门验这个），先把它结算掉，下面每一步的数字才是确定的。
+ */
+
+/** 一个窗口 `windowMs`、但最多只肯等 `longestWaitMs` 的闸门。 */
+function gated(options = {}) {
+  return new Gate({ windowMs: 60_000, longestWaitMs: 50, ...options })
+}
+
+/** 把目录刷一次，让「我们自己的请求」先落账。 */
+const warm = (adapter) => adapter.listModels('acct-codex')
+
+test('gate: an account with no room in the minute gives way to one with room', async () => {
+  const family = makeFamily()
+  const { adapter } = await makeAdapter(family, ['codex-1', 'codex-2'], { gate: gated(), maxRpm: 2 })
+  await warm(adapter)
+  // 两个账号各付了一格（刷目录那次）。把 codex-1 填满，它就这一分钟没余量了。
+  adapter.gate.reserve(whoOf(family, 'codex-1'), 2, 0)
+  const chunks = []
+  for await (const chunk of adapter.stream({
+    provider: 'acct-codex',
+    model: 'm1',
+    messages: [{ id: 'u1', role: 'user' }],
+  })) {
+    chunks.push(chunk)
+  }
+  assert.deepEqual(family.calls, ['codex-2'], 'the one with room goes instead of the one that must wait')
+  assert.equal(chunks.at(-1).reason.kind, 'success')
+})
+
+test('gate: with every account turned away the caller is told when to come back', async () => {
+  const family = makeFamily()
+  const { adapter } = await makeAdapter(family, ['codex-1', 'codex-2'], { gate: gated(), maxRpm: 1 })
+  await warm(adapter)
+  // 两个账号这一分钟都只剩「目录那一次」，于是都没余量了。
+  await assert.rejects(
+    async () => {
+      for await (const _ of adapter.stream({
+        provider: 'acct-codex',
+        model: 'm1',
+        messages: [{ id: 'u1', role: 'user' }],
+      })) {
+        // 什么都不该出来
+      }
+    },
+    (error) => {
+      assert.equal(error.code, 'LOCAL_RATE_LIMIT')
+      assert.ok(
+        [whoOf(family, 'codex-1'), whoOf(family, 'codex-2')].includes(error.who),
+        `the error names a full account, got ${error.who}`,
+      )
+      assert.ok(error.retryAfterSeconds >= 1, 'the caller is told when to come back')
+      assert.ok(error.failure?.providerRetryAfterMs >= 1000, 'and the host is told too')
+      return true
+    },
+  )
+  assert.deepEqual(family.calls, [], 'nothing was sent to the vendor')
+})
+
+test('gate: the report names the account that could go soonest', async () => {
+  // 两个都没余量时，报出来的那个决定调用方要等多久——所以要报最快能发的那个。
+  // 两个账号的目录是同一批问的（时间戳几乎相同），所以不能让它们「自然」差出先后：
+  // 给 codex-2 提前订上「一分钟后的那一次」，它就变成要等两分钟，codex-1 才是该报的那个。
+  const family = makeFamily()
+  const { adapter } = await makeAdapter(family, ['codex-1', 'codex-2'], { gate: gated(), maxRpm: 1 })
+  await warm(adapter)
+  const booked = adapter.gate.reserve(whoOf(family, 'codex-2'), 1, Number.MAX_SAFE_INTEGER)
+  assert.ok(booked.at > Date.now(), 'the second place is a whole minute out')
+  await assert.rejects(
+    async () => {
+      for await (const _ of adapter.stream({
+        provider: 'acct-codex',
+        model: 'm1',
+        messages: [{ id: 'u1', role: 'user' }],
+      })) {
+        // 什么都不该出来
+      }
+    },
+    (error) => {
+      assert.equal(error.code, 'LOCAL_RATE_LIMIT')
+      assert.equal(error.who, whoOf(family, 'codex-1'), 'the sooner one is the one worth reporting')
+      assert.ok(
+        error.afterMs > 0 && error.afterMs <= 60_000,
+        `a minute at most is what codex-1 owes, got ${error.afterMs}`,
+      )
+      return true
+    },
+  )
+})
+
+test('gate: a turned-away account is not cooled — it did nothing wrong', async () => {
+  const family = makeFamily()
+  const { adapter, health } = await makeAdapter(family, ['codex-1'], { gate: gated(), maxRpm: 1 })
+  await warm(adapter)
+  await assert.rejects(async () => {
+    for await (const _ of adapter.stream({
+      provider: 'acct-codex',
+      model: 'm1',
+      messages: [{ id: 'u1', role: 'user' }],
+    })) {
+      // 什么都不该出来
+    }
+    // 断言到码：不然「没有账号提供这个模型」之类的错也会让这条用例通过。
+  }, (error) => error.code === 'LOCAL_RATE_LIMIT')
+  assert.equal(health.why(family.id, 'codex-1', 'm1'), undefined, 'the account stays usable')
+  assert.equal(health.available(family.id, 'codex-1', 'm1'), true)
+})
+
+test('gate: a caller who walks away stops the loop and is never sent', async () => {
+  const family = makeFamily()
+  const controller = new AbortController()
+  // 窗口压到 5 秒：这样「等这一分钟」是几秒的事，测试不用真站一分钟。
+  const { adapter } = await makeAdapter(family, ['codex-1', 'codex-2'], {
+    gate: gated({ windowMs: 5_000, longestWaitMs: 30_000 }),
+    maxRpm: 1,
+  })
+  await warm(adapter)
+  const before = adapter.gate.rpmUsed(whoOf(family, 'codex-1'))
+  assert.equal(before, 1, 'the catalog refresh is the one ask on the books')
+  const iterator = adapter
+    .stream({
+      provider: 'acct-codex',
+      model: 'm1',
+      messages: [{ id: 'u1', role: 'user' }],
+      signal: controller.signal,
+    })
+    [Symbol.asyncIterator]()
+  const pending = iterator.next()
+  // 让它先走到「等这一分钟」那一步，再按停止——不然测的还是「一开始就放弃」。
+  await new Promise((resolve) => setTimeout(resolve, 80))
+  controller.abort(Object.assign(new Error('user pressed stop'), { name: 'AbortError' }))
+  await assert.rejects(() => pending, /user pressed stop/)
+  assert.deepEqual(family.calls, [], 'a request the caller gave up on is never sent')
+  // 位置还回去了：账上只剩目录那一次，没有留下一个永远不会发的包。
+  assert.equal(adapter.gate.rpmUsed(whoOf(family, 'codex-1')), before, 'its place went back')
+})
+
+test('gate: the slot is held until the stream is read to the end', async () => {
+  const family = makeFamily()
+  const { adapter } = await makeAdapter(family, ['codex-1'], { gate: gated(), maxConcurrency: 1 })
+  const iterator = adapter
+    .stream({
+      provider: 'acct-codex',
+      model: 'm1',
+      messages: [{ id: 'u1', role: 'user' }],
+    })
+    [Symbol.asyncIterator]()
+  await iterator.next()
+  assert.equal(adapter.gate.laneFree(whoOf(family, 'codex-1'), 1), false, 'out at the vendor means out')
+  for await (const _ of { [Symbol.asyncIterator]: () => iterator }) {
+    // 读完
+  }
+  assert.equal(adapter.gate.laneFree(whoOf(family, 'codex-1'), 1), true, 'done at the vendor frees the slot')
+})
+
+test('gate: the pool’s own asks count too', async () => {
+  // 上游数的是它收到的包，不区分那是一次用户消息还是我们刷目录的一次。
+  let asked = 0
+  const family = makeFamily({
+    async listModels() {
+      asked += 1
+      return [{ provider: 'acct-codex', id: 'm1', name: 'M1' }]
+    },
+  })
+  const { adapter } = await makeAdapter(family, ['codex-1'], { gate: gated(), maxRpm: 2 })
+  await adapter.listModels('acct-codex')
+  assert.equal(asked, 1)
+  assert.equal(adapter.gate.rpmUsed(whoOf(family, 'codex-1')), 1, 'the catalog refresh is a request')
+})
+
+test('gate: our own catalog refresh is turned away, not queued', async () => {
+  // 没余量时**当场转开**：为了刷个目录而排队一分钟，是把用户的话挡在后面。
+  let asked = 0
+  const family = makeFamily({
+    async listModels() {
+      asked += 1
+      return [{ provider: 'acct-codex', id: 'm1', name: 'M1' }]
+    },
+  })
+  const { adapter } = await makeAdapter(family, ['codex-1'], { gate: gated(), maxRpm: 1 })
+  adapter.gate.reserve(whoOf(family, 'codex-1'), 1, 0)
+  // 转开的表现是「这次目录没刷成」（列表为空），而不是排一分钟的队：
+  // 上游一次都没被问（`asked` 不动），账上也没留下一个永远不会发的包。
+  assert.deepEqual(await adapter.listModels('acct-codex'), [])
+  assert.equal(asked, 0, 'the catalog ask never went out')
+  assert.equal(adapter.gate.rpmUsed(whoOf(family, 'codex-1')), 1, 'the turned-away ask left nothing behind')
+})
+
+test('gate: a one-a-minute account is paced by the pool, not merely retried', async () => {
+  const sent = []
+  const family = makeFamily({
+    async *stream(_ctx, options) {
+      sent.push({ at: Date.now(), account: options.payload.id })
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+  // 50 毫秒的窗口 = 「每分钟一次」的等价物，但不用真的等一分钟。
+  const adapter = (await makeAdapter(family, ['codex-1', 'codex-2'], {
+    maxRpm: 1,
+    gate: gated({ windowMs: 50, longestWaitMs: 60_000 }),
+  })).adapter
+  // 预热目录：池子**自己**的请求也占分钟名额（`#askUpstream`），先把它花掉，
+  // 免得把「目录也计数」和「流式请求被限速」两件事混在一起看。
+  await adapter.listModels('acct-codex')
+  sent.length = 0
+
+  const ask = async (n) => {
+    for await (const _chunk of adapter.stream({
+      provider: 'acct-codex',
+      model: 'm1',
+      messages: [{ id: `u${n}`, role: 'user' }],
+    })) {
+      // 读完就行
+    }
+  }
+  await Promise.all([1, 2, 3, 4, 5, 6, 7, 8].map(ask))
+
+  assert.equal(sent.length, 8)
+  // 两个账号、每个每 50 毫秒一次 ⇒ 八条请求不可能挤在同一瞬间发出去。
+  const span = Math.max(...sent.map((s) => s.at)) - Math.min(...sent.map((s) => s.at))
+  assert.ok(span >= 100, `expected the gate to spread the sends out, saw a ${span}ms span`)
+  // 每个账号在任何一个窗口里最多发一次。
+  for (const id of ['codex-1', 'codex-2']) {
+    const times = sent.filter((s) => s.account === id).map((s) => s.at).sort((a, b) => a - b)
+    for (let i = 1; i < times.length; i += 1) {
+      assert.ok(times[i] - times[i - 1] >= 45, `${id} sent twice inside one window (${times[i] - times[i - 1]}ms)`)
+    }
+  }
 })
