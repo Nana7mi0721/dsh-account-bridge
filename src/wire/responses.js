@@ -7,19 +7,23 @@
 
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
+import { RESPONSES_REPLAY_KIND, makeEnvelope, replayItem } from './replay.js'
 import { tryJson } from '../util.js'
 
 /**
  * 把 DSH 的 messages 拆成 Responses API 的 `instructions` + `input`。
  *
  * - system 消息（含 `source.kind === 'system-prompt'`）合并进 `instructions`；
- * - assistant 的 `reasoning` 块**不回传**（Responses 要求配加密内容，回传纯文本会 400）；
+ * - assistant 的 `reasoning` 块**默认不回传**（Responses 要求配加密内容，回传纯文本会 400）；
+ *   开了 `replay` 且确实存着 `encrypted_content` 时，把它作为一个 `reasoning` 项放回去
+ *   （**在正文之前**——原始响应里它就是排在前面），见 `wire/replay.js`；
  * - 工具调用回传成 `function_call`，工具结果回传成 `function_call_output`。
  *
  * @param {Array<object>} messages
+ * @param {{replay?: boolean}} [options]
  * @returns {{instructions?: string, input: Array<object>}}
  */
-export function toResponsesInput(messages) {
+export function toResponsesInput(messages, { replay = false } = {}) {
   const instructions = []
   const input = []
 
@@ -34,6 +38,20 @@ export function toResponsesInput(messages) {
       continue
     }
     if (message.role === 'assistant') {
+      for (const [index, block] of (message.content ?? []).entries()) {
+        if (block?.type !== 'reasoning') continue
+        // 默认不回传（这一族以前就是这么做的，见文件头）。开了回放也只有拿得到
+        // 加密内容时才回传：Responses 对「只有纯文本的 reasoning 项」是直接拒的。
+        if (!replay) continue
+        const item = replayItem(message, index, undefined)
+        if (!item) continue
+        input.push({
+          type: 'reasoning',
+          ...(item.id === undefined ? {} : { id: item.id }),
+          summary: [],
+          encrypted_content: item.encryptedContent,
+        })
+      }
       const text = textOf(message.content)
       if (text.length > 0) {
         input.push({ type: 'message', role: 'assistant', content: [{ type: 'output_text', text }] })
@@ -145,15 +163,28 @@ function toolOutputOf(message) {
  * 正好和 DSH 的 `index` 语义对齐。
  *
  * @param {Response} response
- * @param {{effort?: string, signal?: AbortSignal, onEvent?: (event: object) => void}} [options]
+ * @param {{effort?: string, signal?: AbortSignal, onEvent?: (event: object) => void, model?: string}} [options]
  * @returns {AsyncGenerator<object>}
  */
 export async function* translateResponsesStream(response, options = {}) {
-  const { signal, onEvent } = options
+  const { signal, onEvent, model, replay = false } = options
   /** @type {Map<number, {blockType: string, block: object, callId?: string, name?: string}>} */
   const open = new Map()
   /** 已经发过 block-start 的 output_index（有些上游不发 output_item.added）。 */
   const started = new Set()
+  /**
+   * 块出现过的顺序（不是留下的顺序）。
+   *
+   * 与 `wire/anthropic.js` 里那个 `order` 同理，**必须与宿主 `BlockAssembler.order`
+   * 逐位对齐**：宿主是每收到一个带 index 的 chunk 就 `ensure(index)` 一次，
+   * 少了任何一个，`envelope.blocks.length !== all.length`，信封被**静默**丢掉。
+   */
+  const order = []
+  const touch = (index) => {
+    if (!order.includes(index)) order.push(index)
+  }
+  /** index → 要带回去的那一小段（Responses 线是 `encrypted_content`）。 */
+  const replaySlots = new Map()
   /**
    * `item.id` → 块下标。
    *
@@ -169,6 +200,9 @@ export async function* translateResponsesStream(response, options = {}) {
     if (started.has(index)) return
     started.add(index)
     if (!open.has(index)) open.set(index, { blockType, ...seed })
+    touch(index)
+    // 每个「出现过的块」都要在信封里占一个位置，否则块数对不上、信封被丢掉。
+    if (!replaySlots.has(index)) replaySlots.set(index, { type: blockType })
     yield { type: 'block-start', index, blockType }
   }
   let sawOutput = false
@@ -191,6 +225,7 @@ export async function* translateResponsesStream(response, options = {}) {
         const blockType = item.type === 'function_call' ? 'tool-call' : item.type === 'reasoning' ? 'reasoning' : 'text'
         if (typeof item.id === 'string') indexByItemId.set(item.id, index)
         yield* begin(index, blockType, { callId: item.call_id ?? item.id, name: item.name })
+        noteReplay(replaySlots, index, blockType, item)
         break
       }
       case 'response.output_text.delta': {
@@ -228,11 +263,13 @@ export async function* translateResponsesStream(response, options = {}) {
         // 顺序要紧：顶层 → 按 item.id 反查 → 最后才是 0。
         const index = payload.output_index ?? indexByItemId.get(item.id) ?? 0
         const entry = open.get(index) ?? {}
-        const block = blockFromItem(item, entry)
+        const block = blockFromItem(item, entry, replay)
         if (block) {
           sawOutput = true
           if (block.type === 'tool-call') sawToolCall = true
-          yield* begin(index, block.type === 'tool-call' ? 'tool-call' : block.type === 'reasoning' ? 'reasoning' : 'text')
+          const blockType = block.type === 'tool-call' ? 'tool-call' : block.type === 'reasoning' ? 'reasoning' : 'text'
+          yield* begin(index, blockType)
+          noteReplay(replaySlots, index, blockType, item)
           yield { type: 'block-end', index, block }
         }
         open.delete(index)
@@ -280,11 +317,53 @@ export async function* translateResponsesStream(response, options = {}) {
   // 这一轮产出过工具调用就必须报 'tool-calls'：报成 'stop' 会让宿主以为模型把话说完了，
   // 而实际上它在等工具结果——这一条以前是错的（永远回 'stop'），有回归用例钉住。
   const kind = finishReason === 'max-tokens' ? 'max-tokens' : sawToolCall ? 'tool-calls' : 'stop'
-  yield { type: 'finish', reason: { kind } }
+  const replayState = replayStateOf(order, replaySlots, model, replay)
+  yield { type: 'finish', reason: { kind }, ...(replayState === undefined ? {} : { replayState }) }
+}
+
+/**
+ * 把 `response.output_item.*` 里的加密思考状态记进槽位。
+ *
+ * 只认 `reasoning` 项；`id` 与 `encrypted_content` 都可能只出现在 `.added` 或只在
+ * `.done` 里，所以两处都调一次，谁先来算谁的。
+ */
+function noteReplay(slots, index, blockType, item) {
+  if (blockType !== 'reasoning') return
+  const slot = slots.get(index) ?? { type: 'reasoning' }
+  slot.type = 'reasoning'
+  if (typeof item.id === 'string' && item.id.length > 0) slot.id = item.id
+  if (typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0) {
+    slot.encryptedContent = item.encrypted_content
+  }
+  slots.set(index, slot)
+}
+
+/**
+ * 攒一个信封——**只在回放开着、且真有加密内容的时候**。
+ *
+ * 没有哪个槽位带加密内容时返回 `undefined`：一个空壳信封会跟着每一条助手消息
+ * 存进会话文件，换不来任何东西。`blocks` 必须与 `order` 一一对齐，见文件头。
+ */
+function replayStateOf(order, slots, model, replay) {
+  if (replay !== true) return undefined
+  if (typeof model !== 'string' || model.length === 0) return undefined
+  const blocks = order.map((index) => {
+    const slot = slots.get(index)
+    const type = slot?.type ?? 'text'
+    return {
+      type,
+      ...(typeof slot?.id === 'string' && slot.id.length > 0 ? { id: slot.id } : {}),
+      ...(typeof slot?.encryptedContent === 'string' && slot.encryptedContent.length > 0
+        ? { encryptedContent: slot.encryptedContent }
+        : {}),
+    }
+  })
+  if (!blocks.some((block) => typeof block.encryptedContent === 'string')) return undefined
+  return makeEnvelope(RESPONSES_REPLAY_KIND, model, blocks)
 }
 
 /** 把 Responses 的输出项翻成 DSH 的完整块。 */
-function blockFromItem(item, entry) {
+function blockFromItem(item, entry, replay = false) {
   if (item.type === 'function_call') {
     return {
       type: 'tool-call',
@@ -297,7 +376,12 @@ function blockFromItem(item, entry) {
     const text = (item.summary ?? item.content ?? [])
       .map((part) => part?.text ?? '')
       .join('')
-    return text.length > 0 ? { type: 'reasoning', text } : undefined
+    if (text.length > 0) return { type: 'reasoning', text }
+    // 只剩加密内容、一颗字都没有的思考项：默认仍然丢掉（老行为，界面上不该多出
+    // 一个空的思考块）；只有在回放开着时才把它变成一个空块——那时它是这一轮
+    // **唯一**能把状态带回去的载体，丢掉它等于把回放这条路也丢掉。
+    const encrypted = typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0
+    return replay && encrypted ? { type: 'reasoning', text: '' } : undefined
   }
   const text = (item.content ?? [])
     .map((part) => part?.text ?? '')

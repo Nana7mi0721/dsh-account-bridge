@@ -132,6 +132,13 @@ export class AccountBridgeAdapter {
    */
   #affinity
   #affinityMode
+  /**
+   * 协议状态回放（W4）。
+   *
+   * 开了也只是**第一个候选**能用：签名是某个账号签的，把它发给另一个账号是
+   * 没验过的事，而换号本来就是「上一个账号刚出事」的时刻——那时候最不该赌。
+   */
+  #replay
   /** 最近一次选择给出的理由（`/pool` 与调试用）。`<族>/<模型>/<会话>` → 裁决。 */
   #lastWhy = new Map()
   #inflightRefresh = new Map()
@@ -152,7 +159,7 @@ export class AccountBridgeAdapter {
   #sunkSeq = 0
   #hold
 
-  constructor({ ctx, store, health, families, log, hold, affinity, affinityMode }) {
+  constructor({ ctx, store, health, families, log, hold, affinity, affinityMode, replay }) {
     this.#ctx = ctx
     this.#store = store
     this.#health = health
@@ -161,6 +168,7 @@ export class AccountBridgeAdapter {
     this.#hold = { ...HOLD_DEFAULTS, ...(hold ?? {}) }
     this.#affinity = affinity ?? new AffinityBook({ log })
     this.#affinityMode = normaliseMode(affinityMode)
+    this.#replay = replay === true
   }
 
   /** 会话亲和那本账（`index.js` 在 `storageDomain` 就绪后把表接上去）。 */
@@ -697,6 +705,8 @@ export class AccountBridgeAdapter {
             system: options.system,
             maxTokens: options.maxTokens,
             signal: options.signal,
+            // 回放只给第一个候选：签名是某个账号签的，换号之后再把它发出去是没验过的事。
+            replay: this.#replay && index === 0,
           })
           [Symbol.asyncIterator]()
 

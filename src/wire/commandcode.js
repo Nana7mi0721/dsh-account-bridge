@@ -862,10 +862,10 @@ export class StreamAssembler {
  * 事件处理器；`messages` 直接复用 `wire/anthropic.js` 的翻译器，因为线上
  * 形状就是 Anthropic 的事件流。
  */
-export async function* translateCommandCodeStream(response, protocol, { signal, onDiagnostic } = {}) {
+export async function* translateCommandCodeStream(response, protocol, { signal, onDiagnostic, model } = {}) {
   if (protocol === 'messages') {
     // 这条传输线上就是 Anthropic 的事件流，诊断也一并转交。
-    yield* translateAnthropicStream(response, { signal, onDiagnostic })
+    yield* translateAnthropicStream(response, { signal, onDiagnostic, model })
     return
   }
   const assembler = new StreamAssembler()

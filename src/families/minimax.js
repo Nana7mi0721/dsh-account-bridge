@@ -505,7 +505,7 @@ export const minimaxFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, system, maxTokens, signal } = options
+    const { payload, model, messages, tools, system, maxTokens, signal, replay } = options
     const auth = payload.auth ?? {}
     const region = REGIONS.includes(auth.region) ? auth.region : 'en'
     const limit = Math.max(1_024, Number(maxTokens) || 0 || catalogEntry(model)?.maxTokens || DEFAULT_MAX_TOKENS)
@@ -513,7 +513,7 @@ export const minimaxFamily = {
       model,
       max_tokens: limit,
       system: toAnthropicSystem(system, messages),
-      messages: toAnthropicMessages(messages),
+      messages: toAnthropicMessages(messages, { replay }),
       stream: true,
       // 与客户端自己的 default_value: 'true' 一致。上游实测接受 adaptive，
       // 也接受 enabled+budget_tokens；两种都会回 thinking 块，而
@@ -533,6 +533,10 @@ export const minimaxFamily = {
       const text = await reply.text().catch(() => '')
       throw httpError(reply, text, 'minimax')
     }
-    yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
+    yield* translateAnthropicStream(reply, {
+      signal,
+      onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+      model,
+    })
   },
 }

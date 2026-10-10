@@ -149,6 +149,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | `families` | 全部 | 只启用列出的族 |
 | `affinity` | `auto` | 会话粘性四态，见「设计要点」 |
 | `affinityDebounceMs` | `2000` | 亲和记录攒多久落一次盘；只影响写入频率 |
+| `replay` | `false` | 把上游的思考签名 / 加密思考块在下一轮带回去。**默认关**，理由与两条线的差别见「设计要点」 |
 | `holdLongestMs` / `holdThinkingMs` / `holdMostBytes` | 见 `src/pool.js` | 换号窗口的三个上限。上游特别慢（首字节要等 20 秒以上）时把 `holdLongestMs` 调长 |
 | `discoverOnStartup` | `true` | 启动时后台扫一遍本机客户端登录态（只打日志，不导入任何东西）。关掉它的理由是 `agy` 族的探测要起一次子进程 |
 | `claudeClientVersion` / `codexClientVersion` | 自动 | 冒充的上游 CLI 版本；留空则查 npm 最新，查不到用兜底常量并如实标注 |
@@ -393,6 +394,7 @@ src/
     anthropic.js      DSH 消息 ↔ Anthropic Messages API（Claude / MiniMax Code / 通用族）
     chat-completions.js  DSH 消息 ↔ OpenAI Chat Completions API（通用族）
     agy.js            agy NDJSON ↔ DSH chunk（纯函数，用真实抓包做夹具）
+    replay.js         上游要求「带回来」的协议状态（思考签名 / encrypted_content）
     qoder.js          Qoder 私有信封 + COSY 签名 + WAF body 编码（纯函数）
     workbuddy.js      WorkBuddy 私有层（信包、身份模仿头、额度三态）
     commandcode.js    CommandCode 三传输协商（cli / provider-chat / provider-messages）
@@ -506,7 +508,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**927 个用例，914 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**951 个用例，938 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
@@ -552,6 +554,25 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   （`generic`/`copilot`/`trae` 一个族里什么模型都有）。
   **憋住期间不发保活**：那是外层网关（magpie / CLIProxyAPI）才有的动作，我们是进程内 adapter，
   没有能写 SSE 注释的那一层，宿主也没有流空闲超时（`dsh-llm` 里 `idle`/`stall`/`keepalive` 零命中）。
+- **上游要求「带回来」的那点东西，我们不再扔**（`src/wire/replay.js`）。Anthropic 开了
+  extended thinking 之后，**带签名的思考块必须完整未修改地出现在下一轮的助手轮里**：不发，
+  要么 400，要么助手轮从 `tool_use` 开头——一个「不带思考的工具调用」，那正是它拒收的形状。
+  Responses 线要的是 `encrypted_content`。宿主为这件事留了一个对适配器不透明的口袋：
+  `finish` 块可以带 `replayState`，它原样存进 `message.source.replayState` 并持久化。
+  这一条有几个只有读宿主源码才知道的坑：
+
+  | 事实 | 后果 |
+  |---|---|
+  | `assembled()` 拿 `envelope.blocks.length` 与**它自己见过的块数**对一下，对不上就**整个信封丢掉** | `blocks` 必须与流里**出现过的**块一一对齐，而且是「见过的顺序」不是「留下的顺序」——`max-tokens` 会丢掉工具调用块，那时宿主**按同样的位置**过滤信封，我们照样得为被丢掉的块留一个占位 |
+  | 我们 11 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
+  | 签名是**某一个账号**签的 | 回放只给**第一个**候选（`replay: this.#replay && index === 0`）。换号之后把上一家签的东西发给下一家，是既没验过也不该发生的事——上游会拒，而我们无从分辨那是「格式不对」还是「这不是你签的」 |
+  | **读不懂就是没有**，绝不抛错 | 版本不认识、模型换了、块数不齐、类型对不上——统统一声不响地降级成「不带这个状态」。宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400 |
+
+  **默认关，而且是有理由的关**：跨账号能不能用另一个账号签发的思考块，我们没验过（本机没有
+  这两家的订阅）。关着的时候签名照旧一个字符都不会丢，只是下一轮不往回发；两条线的口径不完全
+  一样，是因为它们拿到状态的方式不一样——Anthropic 的 `signature_delta` **不管你要不要都会发**
+  （所以攒着是白送的），Responses 的 `encrypted_content` **得先在请求里 `include` 才会给**
+  （所以不开回放就不去要，免得改动了默认请求）。`config.replay: true` 两半一起打开。
 - **「谁先上」不是 id 顺序，而是「谁最撑得住 + 谁最近被打得最少」**（`src/select.js`，语义借自
   magpie，见 `THIRD_PARTY_NOTICES.md`）。旧写法是
   `ready.sort((a, b) => a.account.id.localeCompare(b.account.id))`：所有请求压在字典序第一个

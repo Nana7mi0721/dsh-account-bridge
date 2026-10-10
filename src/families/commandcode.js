@@ -913,6 +913,9 @@ async function* stream(ctx, options) {
       continue
     }
     try {
+      // 刻意**不传 `model`**：`model` 只用来决定「收尾带不带 replayState」，
+      // 而这条线自己组装 messages（`toMessagesMessages`），从不把思考块发回去
+      // ⇒ 攒出来的信封没有任何人会读，只会白白留在会话文件里。
       for await (const chunk of translateCommandCodeStream(reply, protocol, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })) {
         if (chunk.type === 'block-end') delivered = true
         yield chunk

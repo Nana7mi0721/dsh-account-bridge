@@ -421,7 +421,7 @@ export const genericFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, system, maxTokens, signal } = options
+    const { payload, model, messages, tools, effort, system, maxTokens, signal, replay } = options
     const auth = payload?.auth ?? {}
     const compat = compatOf(auth)
     const declared = declaredModels(auth).find((item) => item.id === model)
@@ -436,7 +436,7 @@ export const genericFamily = {
       const body = {
         model,
         max_tokens: limit,
-        messages: toAnthropicMessages(messages, { cache: false }),
+        messages: toAnthropicMessages(messages, { cache: false, replay }),
         stream: true,
         ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
         ...(tools?.length ? { tools: toAnthropicTools(tools), tool_choice: { type: 'auto' } } : {}),
@@ -449,7 +449,11 @@ export const genericFamily = {
       // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
       const reply = await assertApiReply(response, { who: 'generic' })
       if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), 'generic')
-      yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
+      yield* translateAnthropicStream(reply, {
+        signal,
+        onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+        model,
+      })
       return
     }
 

@@ -356,3 +356,55 @@ test('adapter.unfreeze on a healthy account is a no-op', async () => {
   assert.equal(adapter.unfreeze('codex', 'codex-1'), 0)
   assert.equal(adapter.healthOf('codex', 'codex-1'), undefined)
 })
+
+test('replay reaches the first candidate only: no account is handed a signature another account made', async () => {
+  // 签名是**某一个账号**签的。换号之后把上一家签的东西发给下一家，是既没验过、
+  // 也不该发生的事（上游会拒，而且我们无从分辨那是「格式不对」还是「这不是你签的」）。
+  const seen = []
+  const family = makeFamily({
+    async *stream(ctx, options) {
+      seen.push(options.replay === true)
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      if (options.payload.id === 'codex-1') {
+        throw Object.assign(new Error('boom'), { code: 'SERVER' })
+      }
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+      yield { type: 'block-end', index: 0, block: { type: 'text', text: 'ok' } }
+      yield { type: 'finish', reason: { kind: 'stop' } }
+    },
+  })
+
+  const run = async (replay) => {
+    seen.length = 0
+    const credentials = createMemoryCredentials()
+    const store = new AccountStore(credentials, silent)
+    for (const id of ['codex-1', 'codex-2']) {
+      await store.write(id, {
+        id,
+        family: 'codex',
+        label: id,
+        auth: { access: 't', refresh: 'r', expiresAt: Date.now() + 3_600_000 },
+      })
+    }
+    const adapter = new AccountBridgeAdapter({
+      ctx: { fetch: async () => {}, log: silent, config: {} },
+      store,
+      health: new CooldownTable(),
+      families: [family],
+      log: silent,
+      replay,
+    })
+    for await (const _ of adapter.stream({
+      provider: 'acct-codex',
+      model: 'm1',
+      messages: [{ id: 'u1', role: 'user' }],
+    })) {
+      // 读干净就行
+    }
+  }
+
+  await run(true)
+  assert.deepEqual(seen, [true, false], 'the first candidate replays, the one that took over does not')
+  await run(false)
+  assert.deepEqual(seen, [false, false], 'with replay off nobody replays, not even the first')
+})

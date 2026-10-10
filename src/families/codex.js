@@ -283,8 +283,8 @@ export const codexFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, signal, account, session } = options
-    const { instructions, input } = toResponsesInput(messages)
+    const { payload, model, messages, tools, effort, signal, account, session, replay } = options
+    const { instructions, input } = toResponsesInput(messages, { replay })
     // 缓存亲和键：**按账号派生**，与身份命名空间同一套派生（见 wire/identity.js）。
     // 不发裸会话 id —— 那会让上游看到「同一段对话从两个安装打过来」。
     const cacheKey = scopeCacheKey(account, session)
@@ -297,7 +297,9 @@ export const codexFamily = {
       parallel_tool_calls: true,
       store: false,
       stream: true,
-      include: [],
+      // 只有回放开着才去要加密思考内容：默认路径的请求体与以前逐字节相同，
+      // 免得为一个默认关掉的功能去动每一轮的请求。
+      include: replay === true ? ['reasoning.encrypted_content'] : [],
       ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
       ...(effort ? { reasoning: { effort, summary: 'auto' } } : {}),
     }
@@ -318,7 +320,7 @@ export const codexFamily = {
       const text = await reply.text().catch(() => '')
       throw httpError(reply, text, 'codex')
     }
-    yield* translateResponsesStream(reply, { signal })
+    yield* translateResponsesStream(reply, { signal, model, replay })
   },
 }
 

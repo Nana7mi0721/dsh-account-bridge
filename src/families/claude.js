@@ -275,7 +275,7 @@ export const claudeFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, system, maxTokens, signal, account, session } = options
+    const { payload, model, messages, tools, effort, system, maxTokens, signal, account, session, replay } = options
     const auth = payload.auth ?? {}
     const capabilities = capabilityCache.get(model)
     const thinkingType = claudeThinkingType(capabilities)
@@ -285,7 +285,7 @@ export const claudeFamily = {
       model,
       max_tokens: limit,
       system: toAnthropicSystem(system, messages),
-      messages: toAnthropicMessages(messages),
+      messages: toAnthropicMessages(messages, { replay }),
       stream: true,
       // 会话身份与请求头里的 `x-claude-code-session-id` 是**同一个值**（见 requestHeaders）。
       ...(scoped ? { metadata: claudeMetadata(account, auth, scoped) } : {}),
@@ -312,7 +312,11 @@ export const claudeFamily = {
       const text = await reply.text().catch(() => '')
       throw httpError(reply, text, 'claude')
     }
-    yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
+    yield* translateAnthropicStream(reply, {
+      signal,
+      onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+      model,
+    })
   },
 }
 

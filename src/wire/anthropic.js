@@ -9,11 +9,14 @@
  *   `<system-reminder>` 当 user 文本，这样它前面的缓存前缀保持逐字节不变。
  * - `tool_use` 只出现在 assistant 消息里；其它角色里的 tool-call 是「历史叙述」，
  *   降级成文本，否则 Anthropic 会因为「没有配对的 tool_result」直接 400。
+ * - 开了 extended thinking 之后，**带签名的思考块必须完整带回去**（见 `wire/replay.js`）。
+ *   这一半默认只**记录**不回放：跨账号能不能用签名我们没验过，本机也没有订阅能验。
  * @module dsh-account-bridge/wire/anthropic
  */
 
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
+import { ANTHROPIC_REPLAY_KIND, makeEnvelope, replayValue } from './replay.js'
 
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
@@ -90,8 +93,13 @@ export function toAnthropicSystem(system, messages = [], { identity = CLAUDE_COD
  *
  * `cache` 控制要不要打 prompt-cache 断点。官方端点认 `cache_control`，但任意兼容端点
  * 未必认（有的会对未知字段直接 400），所以 `generic` 族传 false。
+ *
+ * `replay` 控制要不要把**带签名的思考块**放回助手轮（默认 false，见文件头）。
+ * 只有签名在手上时才放：Anthropic 对「没有签名的 thinking 块」是直接拒的，
+ * 而放一个空签名的块等于把「这里本来有思考」这件事说给上游听却拿不出证据。
+ * 没有签名时这个块**整个跳过**——那是这一族从第一天起的既有行为。
  */
-export function toAnthropicMessages(messages, { cache = true } = {}) {
+export function toAnthropicMessages(messages, { cache = true, replay = false } = {}) {
   const out = []
   const start = conversationStart(messages)
   for (const [index, message] of messages.entries()) {
@@ -120,7 +128,7 @@ export function toAnthropicMessages(messages, { cache = true } = {}) {
       continue
     }
 
-    for (const block of message.content ?? []) {
+    for (const [blockIndex, block] of (message.content ?? []).entries()) {
       switch (block.type) {
         case 'text':
           blocks.push({
@@ -131,6 +139,14 @@ export function toAnthropicMessages(messages, { cache = true } = {}) {
                 : block.text,
           })
           break
+        case 'reasoning': {
+          // 默认整块跳过（这一族以前就是这么做的）。开了回放也只有签名在手上才放。
+          if (!replay || role !== 'assistant') break
+          const signature = replayValue(message, ANTHROPIC_REPLAY_KIND, blockIndex, undefined)
+          if (signature === undefined) break
+          blocks.push({ type: 'thinking', thinking: block.text ?? '', signature })
+          break
+        }
         case 'tool-call':
           blocks.push(
             role === 'assistant'
@@ -251,10 +267,38 @@ function finishKind(stopReason, report) {
  *
  * `onDiagnostic` 是**只上报、不改变行为**的旁路：翻译层发现「上游说了我们看不懂的话」
  * 时把它记下来，但绝不因此改变 chunk 序列。不传就是没有观察者，什么都不发生。
+ *
+ * `model` 是本次请求的模型 id。给了它，收尾就会带一个 `replayState`（见 `wire/replay.js`）；
+ * 不给就不带——`response.model` 必须是逐字对得上的字符串，瞎填一个只会让宿主最后一刻把
+ * 整个信封丢掉，还不如一开始就不写。
  */
-export async function* translateAnthropicStream(response, { signal, onDiagnostic } = {}) {
+export async function* translateAnthropicStream(response, { signal, onDiagnostic, model } = {}) {
   // 每个 block index 一份累积器：`block-end` 必须携带**完整**块对象。
   const accumulators = new Map()
+  /**
+   * 块出现过的顺序（不是留下的顺序）。
+   *
+   * `content_block_stop` 会把累积器删掉，所以「还有哪些块」不能从 Map 里看；
+   * 而 `finish.replayState.blocks` 必须与宿主见过的那串块**位置一一对齐**，
+   * 包括它后来因为 `max-tokens` 丢掉的工具调用块（宿主按同样的位置过滤信封，
+   * 我们少留一个占位，整个信封就会被它判成「对不上」丢掉）。见 `wire/replay.js` 文件头。
+   *
+   * **必须在「每一次带 index 的 chunk 出口」上都碰一下**，而不只是在 `content_block_start`：
+   * 宿主那边是每收到一个带 index 的 chunk 就 `ensure(index)` 一次，我们漏记一个，
+   * 信封的块数就和它对不上，整个信封被丢掉——而且是**静默**丢掉。
+   */
+  const order = []
+  /** index → 要带回去的那一小段（只有 reasoning 块有签名）。 */
+  const replaySlots = new Map()
+  const touch = (index) => {
+    if (order.includes(index)) return
+    order.push(index)
+    // 每个「出现过的块」都要在信封里占一个位置；类型按累积器认，宿主那边
+    // 是按第一个带 index 的 chunk 的 blockType 记的，两边必须一致。
+    if (!replaySlots.has(index)) {
+      replaySlots.set(index, { type: replayBlockType(accumulators.get(index)?.type) })
+    }
+  }
   let sawContent = false
   let stopReason
   let usage
@@ -296,6 +340,14 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
           name: block.name,
           json: '',
         })
+        touch(index)
+        // 有的上游把签名放在起始块上（而不是后面跟一串 signature_delta）。
+        replaySlots.set(index, {
+          type: replayBlockType(block.type),
+          ...(typeof block.signature === 'string' && block.signature.length > 0
+            ? { signature: block.signature }
+            : {}),
+        })
         sawContent = true
         yield {
           type: 'block-start',
@@ -310,27 +362,44 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
       case 'content_block_delta': {
         const index = payload.index ?? 0
         const delta = payload.delta ?? {}
-        const slot = accumulators.get(index) ?? { type: 'text', text: '', thinking: '', json: '' }
+        // 上游没发 content_block_start 就来了 delta（畸形流，但会真的发生）：
+        // 类型必须从 delta 自己推，不能一律当 text——宿主的块类型是从
+        // **第一个带 index 的 chunk** 上取的，猜错会让块与信封都对不上。
+        const fallback =
+          delta.type === 'thinking_delta' || delta.type === 'signature_delta'
+            ? 'thinking'
+            : delta.type === 'input_json_delta'
+              ? 'tool_use'
+              : 'text'
+        const slot = accumulators.get(index) ?? { type: fallback, text: '', thinking: '', json: '' }
         accumulators.set(index, slot)
         if (delta.type === 'text_delta' && typeof delta.text === 'string') {
           slot.text += delta.text
           sawContent = true
+          touch(index)
           yield { type: 'text-delta', index, text: delta.text }
         } else if (delta.type === 'thinking_delta' && typeof delta.thinking === 'string') {
           slot.thinking += delta.thinking
           sawContent = true
+          touch(index)
           yield { type: 'reasoning-delta', index, text: delta.thinking }
         } else if (delta.type === 'input_json_delta' && typeof delta.partial_json === 'string') {
           slot.json += delta.partial_json
+          touch(index)
           yield { type: 'tool-call-delta', index, argumentsDelta: delta.partial_json }
+        } else if (delta.type === 'signature_delta' && typeof delta.signature === 'string') {
+          // 只对回放有意义：DSH 侧不需要它，但要照原样存下来给下一轮带回去。
+          touch(index)
+          const entry = replaySlots.get(index)
+          if (entry) entry.signature = (entry.signature ?? '') + delta.signature
         }
-        // signature_delta 只对回放有意义，DSH 侧不需要。
         break
       }
       case 'content_block_stop': {
         const index = payload.index ?? 0
         const slot = accumulators.get(index)
         accumulators.delete(index)
+        touch(index)
         yield { type: 'block-end', index, block: blockFromSlot(slot) }
         break
       }
@@ -346,6 +415,7 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
 
   // 上游没发 content_block_stop 就把剩下的收尾，别把内容丢掉。
   for (const [index, slot] of accumulators) {
+    touch(index)
     yield { type: 'block-end', index, block: blockFromSlot(slot) }
   }
 
@@ -355,7 +425,38 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
     throw error
   }
   if (usage) yield { type: 'usage', usage }
-  yield { type: 'finish', reason: { kind: finishKind(stopReason, onDiagnostic) } }
+  const reason = { kind: finishKind(stopReason, onDiagnostic) }
+  const replayState = replayEnvelope(order, replaySlots, model)
+  yield { type: 'finish', reason, ...(replayState === undefined ? {} : { replayState }) }
+}
+
+/** 上游块类型 → DSH 块类型（信封里的 `type` 必须和内容块的 `type` 逐字相同）。 */
+function replayBlockType(type) {
+  if (type === 'thinking') return 'reasoning'
+  if (type === 'tool_use') return 'tool-call'
+  return 'text'
+}
+
+/**
+ * 攒一个信封——**只在真有东西要带回去的时候**。
+ *
+ * 没有签名（没开 thinking、或上游压根没发思考块）时返回 `undefined`：一个空壳信封
+ * 会跟着每一条助手消息存进会话文件，换不来任何东西。有签名时 `blocks` 必须与
+ * `order` 一一对齐，见 `wire/replay.js` 文件头。
+ */
+function replayEnvelope(order, slots, model) {
+  if (typeof model !== 'string' || model.length === 0) return undefined
+  const blocks = order.map((index) => {
+    const entry = slots.get(index)
+    const type = entry?.type ?? 'text'
+    const signature = entry?.signature
+    return {
+      type,
+      ...(typeof signature === 'string' && signature.length > 0 ? { signature } : {}),
+    }
+  })
+  if (!blocks.some((block) => typeof block.signature === 'string')) return undefined
+  return makeEnvelope(ANTHROPIC_REPLAY_KIND, model, blocks)
 }
 
 /** 累积器 → DSH 的完整块对象。 */

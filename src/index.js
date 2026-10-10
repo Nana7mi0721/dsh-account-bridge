@@ -80,6 +80,21 @@ const DEFAULTS = {
   affinity: undefined,
   /** 落盘攒多久写一次；只影响写入频率，不影响判定。 */
   affinityDebounceMs: undefined,
+  /**
+   * 协议状态回放（W4）：把上游要求「原样带回来」的东西存进会话，下一轮再发回去。
+   *
+   * 各家要的东西不一样：Anthropic 开了 extended thinking 之后，**带签名的思考块
+   * 必须完整未修改地出现在下一轮的助手轮里**，否则要么 400、要么它收到一个
+   * 「不带思考的工具调用」——那正是它拒绝的形状；Responses 线要的是
+   * `encrypted_content`。
+   *
+   * **默认关，而且是有理由的关**：跨账号能不能用另一个账号签发的思考块，
+   * 我们没验过（本机没有这两家的订阅可以验）。关着的时候，**上游要求的签名照旧
+   * 一个字符都不会丢**——它会随每一条助手消息存进会话文件，只是下一轮不往回发。
+   * 想开就开，但请知道这是一条**没验过的路**：本仓的 `README.md` 里写明了
+   * 两半分别验到了什么。
+   */
+  replay: false,
 }
 
 /** 取一个可能尚未就绪的服务。 */
@@ -130,6 +145,7 @@ export function apply(ctx, config) {
     log,
     affinity,
     affinityMode: settings.affinity,
+    replay: settings.replay === true,
     hold: {
       // 任何一个没配就整组回落默认值——只调一个不等于把另两个清零。
       ...(settings.holdLongestMs === undefined ? {} : { longestMs: settings.holdLongestMs }),
