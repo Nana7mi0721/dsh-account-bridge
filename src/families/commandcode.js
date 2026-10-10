@@ -29,6 +29,8 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { assertApiReply } from '../wire/assert-reply.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { httpError } from '../wire/http-error.js'
 import { randomId, withSource } from '../util.js'
 import {
@@ -892,24 +894,26 @@ async function* stream(ctx, options) {
       payload?.proxy,
       /* streaming */ true,
     )
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      const failure = await httpError(response, text, 'commandcode')
-      const next = delivered ? undefined : routingMismatch(protocol, response.status, text)
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'commandcode' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      const failure = await httpError(reply, text, 'commandcode')
+      const next = delivered ? undefined : routingMismatch(protocol, reply.status, text)
       // 降级只在「上一套确实不可用」时发生，且绝不回头重复试同一套。
       if (next === undefined || attempted.has(next)) throw failure
       ctx.log?.info?.(
         'account-bridge: commandcode %s rejected protocol %s (%s); retrying over %s',
         model,
         protocol,
-        describeReason(response.status, text),
+        describeReason(reply.status, text),
         next,
       )
       protocol = next
       continue
     }
     try {
-      for await (const chunk of translateCommandCodeStream(response, protocol, { signal })) {
+      for await (const chunk of translateCommandCodeStream(reply, protocol, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })) {
         if (chunk.type === 'block-end') delivered = true
         yield chunk
       }

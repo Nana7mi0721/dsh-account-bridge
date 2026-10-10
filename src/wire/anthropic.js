@@ -13,6 +13,7 @@
  */
 
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
@@ -205,19 +206,38 @@ export function toAnthropicTools(tools) {
  * 写成 `'success'` / `'tool-use'` 这类看起来更自然的词会被宿主当成未知值——
  * 而 `max-tokens` 是有实际语义的（宿主会据此丢掉工具调用块，见 `_llm.js:1054`），
  * 所以这三个值必须逐字对上。
+ *
+ * `pause_turn` 归 `'max-tokens'` 而不是 `'stop'`：它的意思是「这一轮被**服务端工具**
+ * 暂停了，把响应原样发回来就能接着跑」——也就是**模型没说完**。归成 `'stop'` 的话宿主
+ * 认为这是一次正常收尾，用户拿到一段被截断的答案而界面上看不出任何异常。
+ * RelayKit 的 `reasonmap` 也是把它映射成 `length`，理由写得很直白：**可续跑 ≠ 正常结束**。
+ *
+ * 不认识的 stop_reason **照样回 `'stop'`**（不许因为不认识就抛：那会把一次可用的回答
+ * 变成一次失败），但会通过 `report` 上报一条诊断——上游加了新值而我们没跟上，
+ * 这种事只有留痕才有机会被发现。
  */
-function finishKind(stopReason) {
+function finishKind(stopReason, report) {
   switch (stopReason) {
     case 'tool_use':
       return 'tool-calls'
     case 'max_tokens':
       return 'max-tokens'
+    case 'pause_turn':
+      return 'max-tokens'
     case 'refusal':
       return 'error'
     case 'end_turn':
     case 'stop_sequence':
-    case 'pause_turn':
+      return 'stop'
     default:
+      if (stopReason !== undefined && stopReason !== null && stopReason !== '') {
+        report?.({
+          code: 'UNKNOWN_STOP_REASON',
+          severity: 'warning',
+          message: `anthropic: unknown stop_reason "${stopReason}", reported as a normal stop`,
+          detail: { raw: stopReason },
+        })
+      }
       return 'stop'
   }
 }
@@ -228,8 +248,11 @@ function finishKind(stopReason) {
  * 事件名与载荷是公开且稳定的 Anthropic 流式协议：
  * `message_start` / `content_block_start` / `content_block_delta` / `content_block_stop` /
  * `message_delta` / `message_stop` / `ping` / `error`。
+ *
+ * `onDiagnostic` 是**只上报、不改变行为**的旁路：翻译层发现「上游说了我们看不懂的话」
+ * 时把它记下来，但绝不因此改变 chunk 序列。不传就是没有观察者，什么都不发生。
  */
-export async function* translateAnthropicStream(response, { signal } = {}) {
+export async function* translateAnthropicStream(response, { signal, onDiagnostic } = {}) {
   // 每个 block index 一份累积器：`block-end` 必须携带**完整**块对象。
   const accumulators = new Map()
   let sawContent = false
@@ -259,7 +282,7 @@ export async function* translateAnthropicStream(response, { signal } = {}) {
 
     switch (kind) {
       case 'message_start': {
-        if (payload.message?.usage) usage = { ...(usage ?? {}), ...normaliseUsage(payload.message.usage) }
+        if (payload.message?.usage) usage = mergeUsageNonZero(usage, normaliseUsage(payload.message.usage))
         break
       }
       case 'content_block_start': {
@@ -313,7 +336,7 @@ export async function* translateAnthropicStream(response, { signal } = {}) {
       }
       case 'message_delta': {
         if (payload.delta?.stop_reason) stopReason = payload.delta.stop_reason
-        if (payload.usage) usage = { ...(usage ?? {}), ...normaliseUsage(payload.usage) }
+        if (payload.usage) usage = mergeUsageNonZero(usage, normaliseUsage(payload.usage))
         break
       }
       default:
@@ -332,7 +355,7 @@ export async function* translateAnthropicStream(response, { signal } = {}) {
     throw error
   }
   if (usage) yield { type: 'usage', usage }
-  yield { type: 'finish', reason: { kind: finishKind(stopReason) } }
+  yield { type: 'finish', reason: { kind: finishKind(stopReason, onDiagnostic) } }
 }
 
 /** 累积器 → DSH 的完整块对象。 */

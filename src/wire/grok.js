@@ -19,6 +19,7 @@
  */
 
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 import { tryJson } from '../util.js'
 
 /** 订阅口径（默认）。 */
@@ -481,12 +482,12 @@ export async function* translateGrokStream(response, options = {}) {
         break
       }
       case 'response.completed': {
-        usage = usageOf(payload.response?.usage)
+        usage = mergeUsageNonZero(usage, usageOf(payload.response?.usage))
         if (payload.response?.status === 'incomplete') maxTokensReason = true
         break
       }
       case 'response.incomplete': {
-        usage = usageOf(payload.response?.usage)
+        usage = mergeUsageNonZero(usage, usageOf(payload.response?.usage))
         // 只有「输出被长度截断」才叫 max-tokens；内容过滤也算 incomplete，
         // 那种情况下报 max-tokens 会让上层以为「再加点预算就行」。
         const reason = String(payload.response?.incomplete_details?.reason ?? '')

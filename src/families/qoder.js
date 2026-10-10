@@ -25,6 +25,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { assertApiReply } from '../wire/assert-reply.js'
 import {
   DEFAULT_CONTEXT_WINDOW,
   DEFAULT_MAX_TOKENS,
@@ -517,9 +518,11 @@ export const qoderFamily = {
       body: Buffer.from(encoded, 'latin1'),
       signal,
     }, payload.proxy, true)
-    if (!response.ok) throw qoderHttpError(response, await response.text().catch(() => ''))
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'qoder' })
+    if (!reply.ok) throw qoderHttpError(reply, await reply.text().catch(() => ''))
 
-    yield* translateQoderStream(response, { signal })
+    yield* translateQoderStream(reply, { signal })
   },
 }
 

@@ -22,6 +22,7 @@
  */
 
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
@@ -265,7 +266,7 @@ export async function* translateChatStream(response, { signal } = {}) {
       error.code = 'SERVER'
       throw error
     }
-    if (payload.usage) usage = { ...(usage ?? {}), ...normaliseUsage(payload.usage) }
+    if (payload.usage) usage = mergeUsageNonZero(usage, normaliseUsage(payload.usage))
 
     const choice = Array.isArray(payload.choices) ? payload.choices[0] : undefined
     if (!choice) continue

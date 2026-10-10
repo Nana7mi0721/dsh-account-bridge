@@ -28,6 +28,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { dirname, join, resolve } from 'node:path'
 
+import { assertApiReply } from '../wire/assert-reply.js'
 import { httpError } from '../wire/http-error.js'
 import { toChatMessages, toChatSystem, toChatTools, translateChatStream } from '../wire/chat-completions.js'
 import {
@@ -629,9 +630,11 @@ export const workbuddyFamily = {
       body: region === 'global' ? prepareInternationalChatBody(raw) : normalizeChatBody(raw),
       signal,
     }, payload?.proxy, true)
-    if (!response.ok) throw httpError(response, await response.text().catch(() => ''), ID)
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: ID })
+    if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), ID)
 
-    yield* translateChatStream(response, { signal })
+    yield* translateChatStream(reply, { signal })
   },
 }
 

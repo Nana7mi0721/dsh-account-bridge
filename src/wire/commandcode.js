@@ -27,6 +27,7 @@
 import { randomUUID } from 'node:crypto'
 import { translateAnthropicStream } from './anthropic.js'
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 
 export const DEFAULT_API_BASE = 'https://api.commandcode.ai'
 export const GENERATE_PATH = '/alpha/generate'
@@ -861,13 +862,18 @@ export class StreamAssembler {
  * 事件处理器；`messages` 直接复用 `wire/anthropic.js` 的翻译器，因为线上
  * 形状就是 Anthropic 的事件流。
  */
-export async function* translateCommandCodeStream(response, protocol, { signal } = {}) {
+export async function* translateCommandCodeStream(response, protocol, { signal, onDiagnostic } = {}) {
   if (protocol === 'messages') {
-    yield* translateAnthropicStream(response, { signal })
+    // 这条传输线上就是 Anthropic 的事件流，诊断也一并转交。
+    yield* translateAnthropicStream(response, { signal, onDiagnostic })
     return
   }
   const assembler = new StreamAssembler()
   let finished = false
+  // 独立的 usage 包（OpenAI 传输会在 `[DONE]` 前单独发一个）**不能丢**：
+  // finish 包里也不一定有 usage。攒起来，与 finish 那份合并后只发一帧——
+  // 宿主读 usage 是 `this._usage = chunk.usage`，发两帧等于让后者替换前者。
+  let earlyUsage
   for await (const frame of readSse(response, { signal })) {
     signal?.throwIfAborted()
     if (finished) break
@@ -889,11 +895,16 @@ export async function* translateCommandCodeStream(response, protocol, { signal }
     for (const chunk of chunks) {
       // usage 一律由 assembler 统一在 finish 前补发（CLI 传输的缓存写入是独立
       // 事件，要等它到齐才准，所以不能信任早到的那份 usage）。
-      if (chunk.type === 'usage') continue
+      if (chunk.type === 'usage') {
+        earlyUsage = mergeUsageNonZero(earlyUsage, chunk.usage)
+        continue
+      }
       if (chunk.type === 'finish') {
         finished = true
         if (!assembler.produced) throw emptyResponse('the model finished without producing any content')
-        if (assembler.usage !== undefined) yield { type: 'usage', usage: assembler.usage }
+        // finish 那份是后到的，非零值以它为准；它没报的字段由早到的那份补上。
+        const usage = mergeUsageNonZero(earlyUsage, assembler.usage)
+        if (usage !== undefined) yield { type: 'usage', usage }
       }
       yield chunk
     }

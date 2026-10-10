@@ -20,6 +20,7 @@
 
 import { createCipheriv, createHash, publicEncrypt, randomUUID } from 'node:crypto'
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 
 // ---------------------------------------------------------------- 常量
 
@@ -858,7 +859,7 @@ export async function* translateQoderStream(response, options = {}) {
     if (frame.empty || !frame.inner) continue
 
     const inner = frame.inner
-    usage = normalizeQoderUsage(inner.usage) ?? usage
+    usage = mergeUsageNonZero(usage, normalizeQoderUsage(inner.usage))
 
     for (const choice of Array.isArray(inner.choices) ? inner.choices : []) {
       if (typeof choice?.finish_reason === 'string' && choice.finish_reason.length > 0) {

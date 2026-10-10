@@ -6,6 +6,7 @@
  */
 
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 import { tryJson } from '../util.js'
 
 /**
@@ -239,12 +240,12 @@ export async function* translateResponsesStream(response, options = {}) {
         break
       }
       case 'response.completed': {
-        usage = usageOf(payload.response?.usage)
+        usage = mergeUsageNonZero(usage, usageOf(payload.response?.usage))
         break
       }
       case 'response.incomplete': {
         finishReason = 'max-tokens'
-        usage = usageOf(payload.response?.usage)
+        usage = mergeUsageNonZero(usage, usageOf(payload.response?.usage))
         break
       }
       case 'response.failed': {

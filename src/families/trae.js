@@ -46,6 +46,7 @@ import { readFile, stat } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 
+import { assertApiReply } from '../wire/assert-reply.js'
 import { withSource } from '../util.js'
 import {
   AUTH_STORAGE_KEY,
@@ -989,29 +990,31 @@ export async function* stream(ctx, options) {
     payload?.proxy,
     true,
   )
-  if (!response.ok) {
-    const text = await response.text().catch(() => '')
-    throw traeHttpError(response, text, ID)
+  // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+  const reply = await assertApiReply(response, { who: ID })
+  if (!reply.ok) {
+    const text = await reply.text().catch(() => '')
+    throw traeHttpError(reply, text, ID)
   }
 
   // 上游可能回一段**非流式**的 JSON 信封（HTTP 200 + body 里 code 非 0）。
-  const contentType = response.headers?.get?.('content-type') ?? ''
+  const contentType = reply.headers?.get?.('content-type') ?? ''
   if (contentType.includes('application/json')) {
-    const text = await response.text().catch(() => '')
+    const text = await reply.text().catch(() => '')
     let parsed
     try {
       parsed = JSON.parse(text)
     } catch {
       throw new Error(`trae: 聊天响应既不是事件流也不是 JSON：${text.slice(0, 200)}`)
     }
-    const envelope = envelopeError(parsed, response.status)
+    const envelope = envelopeError(parsed, reply.status)
     if (envelope !== undefined) throw envelope
     const error = new Error('trae: 聊天响应是一个空信封，没有内容')
     error.code = 'EMPTY_RESPONSE'
     throw error
   }
 
-  yield* translateTraeStream(response, { signal })
+  yield* translateTraeStream(reply, { signal })
 }
 
 /* ------------------------------------------------------------------ *

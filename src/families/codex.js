@@ -20,6 +20,7 @@ import { readFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
+import { assertApiReply } from '../wire/assert-reply.js'
 import { httpError } from '../wire/http-error.js'
 import { toResponsesInput, toResponsesTools, translateResponsesStream } from '../wire/responses.js'
 import { resolveCliVersion } from '../cli-version.js'
@@ -311,11 +312,13 @@ export const codexFamily = {
       payload.proxy,
       true,
     )
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw httpError(response, text, 'codex')
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'codex' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      throw httpError(reply, text, 'codex')
     }
-    yield* translateResponsesStream(response, { signal })
+    yield* translateResponsesStream(reply, { signal })
   },
 }
 

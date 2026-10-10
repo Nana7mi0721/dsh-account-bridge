@@ -147,7 +147,9 @@ test('finish kinds stay inside the three values the harness understands', async 
   for (const [stopReason, expected] of [
     ['end_turn', 'stop'],
     ['stop_sequence', 'stop'],
-    ['pause_turn', 'stop'],
+    // `pause_turn` 曾经落在 `default` 里回 `'stop'`，那等于把「被服务端工具暂停、
+    // 还能接着跑」说成「正常说完了」。见下面 W2b 那一组。
+    ['pause_turn', 'max-tokens'],
     [undefined, 'stop'],
     ['tool_use', 'tool-calls'],
     ['max_tokens', 'max-tokens'],
@@ -194,4 +196,121 @@ test('a relay that sends bare data lines, with no event name, still translates',
   const chunks = await collect(translateAnthropicStream(response))
   assert.equal(chunks.find((chunk) => chunk.type === 'block-end')?.block.text, 'hi')
   assert.equal(chunks.at(-1).reason.kind, 'stop')
+})
+
+// ------------------------------------------------ W2b：pause_turn 不是正常结束
+//
+// `pause_turn` 的语义是「这一轮被**服务端工具**暂停了，把响应原样发回来就能接着跑」，
+// 也就是**模型没说完**。归成 `'stop'` 的话宿主认为这是一次正常收尾，用户拿到一段
+// 被截断的答案而界面上看不出任何异常——这正是「错了不会报错」那一类。
+
+test('pause_turn is reported as max-tokens, because a resumable turn is not a finished one', async () => {
+  const chunks = await collect(
+    translateAnthropicStream(
+      sseResponse([
+        { event: 'message_start', data: { type: 'message_start', message: { usage: { input_tokens: 10 } } } },
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'partial' } } },
+        { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+        { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'pause_turn' } } },
+      ]),
+    ),
+  )
+  assert.equal(chunks.at(-1).reason.kind, 'max-tokens')
+})
+
+test('an unknown stop_reason still finishes as a stop, and leaves a diagnostic behind', async () => {
+  // 不认识的停止原因**不许抛**（那会把一次可用的回答变成一次失败），
+  // 但也不许装作没看见——上游加了新值而我们没跟上，只有留痕才有机会被发现。
+  const diagnostics = []
+  const chunks = await collect(
+    translateAnthropicStream(
+      sseResponse([
+        { event: 'message_start', data: { type: 'message_start', message: {} } },
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+        { event: 'content_block_stop', data: { type: 'content_block_stop', index: 0 } },
+        { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'something_new' } } },
+      ]),
+      { onDiagnostic: (entry) => diagnostics.push(entry) },
+    ),
+  )
+  assert.equal(chunks.at(-1).reason.kind, 'stop')
+  assert.equal(diagnostics.length, 1)
+  assert.equal(diagnostics[0].code, 'UNKNOWN_STOP_REASON')
+  assert.equal(diagnostics[0].severity, 'warning')
+  assert.match(diagnostics[0].message, /something_new/)
+})
+
+test('a stream with no stop_reason at all is not a diagnostic-worthy event', async () => {
+  // 兼容端点普遍不发 `stop_reason`。那不是「上游说了句我们不懂的话」，而是「没说」——
+  // 每次正常对话都报一条 warning 会把真正值得看的那条淹掉。
+  const diagnostics = []
+  await collect(
+    translateAnthropicStream(
+      sseResponse([
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+      ]),
+      { onDiagnostic: (entry) => diagnostics.push(entry) },
+    ),
+  )
+  assert.deepEqual(diagnostics, [])
+})
+
+// ---------------------------------------------------- W2c：usage 不许被 0 擦除
+
+test('an explicit zero in message_delta does not erase what message_start reported', async () => {
+  // 兼容端点经常在 `message_delta` 里回 `{input_tokens: 0}`——那不是「输入是 0」，
+  // 而是「这一帧没什么可说的」。用 `{...prev, ...next}` 合并就等于让后者擦掉前者。
+  const chunks = await collect(
+    translateAnthropicStream(
+      sseResponse([
+        {
+          event: 'message_start',
+          data: { type: 'message_start', message: { usage: { input_tokens: 1234, cache_read_input_tokens: 999 } } },
+        },
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+        {
+          event: 'message_delta',
+          data: { type: 'message_delta', delta: { stop_reason: 'end_turn' }, usage: { input_tokens: 0, output_tokens: 42 } },
+        },
+      ]),
+    ),
+  )
+  const usage = chunks.find((chunk) => chunk.type === 'usage').usage
+  assert.equal(usage.inputTokens, 1234)
+  assert.equal(usage.cachedInputTokens, 999)
+  assert.equal(usage.outputTokens, 42)
+})
+
+test('a later non-zero reading does win over an earlier one', async () => {
+  const chunks = await collect(
+    translateAnthropicStream(
+      sseResponse([
+        { event: 'message_start', data: { type: 'message_start', message: { usage: { input_tokens: 10, output_tokens: 1 } } } },
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+        { event: 'message_delta', data: { type: 'message_delta', delta: {}, usage: { input_tokens: 10, output_tokens: 77 } } },
+      ]),
+    ),
+  )
+  const usage = chunks.find((chunk) => chunk.type === 'usage').usage
+  assert.equal(usage.inputTokens, 10)
+  assert.equal(usage.outputTokens, 77)
+})
+
+test('a frame that reports no usage at all leaves the accumulated one alone', async () => {
+  const chunks = await collect(
+    translateAnthropicStream(
+      sseResponse([
+        { event: 'message_start', data: { type: 'message_start', message: { usage: { input_tokens: 55 } } } },
+        { event: 'content_block_start', data: { type: 'content_block_start', index: 0, content_block: { type: 'text', text: '' } } },
+        { event: 'content_block_delta', data: { type: 'content_block_delta', index: 0, delta: { type: 'text_delta', text: 'hi' } } },
+        { event: 'message_delta', data: { type: 'message_delta', delta: { stop_reason: 'end_turn' } } },
+      ]),
+    ),
+  )
+  assert.equal(chunks.find((chunk) => chunk.type === 'usage').usage.inputTokens, 55)
 })

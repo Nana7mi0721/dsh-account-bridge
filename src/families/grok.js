@@ -40,6 +40,7 @@ import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { gunzipSync, inflateSync, brotliDecompressSync } from 'node:zlib'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
+import { assertApiReply } from '../wire/assert-reply.js'
 import { httpError } from '../wire/http-error.js'
 import {
   GROK_API_BASE,
@@ -447,11 +448,13 @@ export const grokFamily = {
       // 不带这个标志会被 undici 的 bodyTimeout 掐断（本仓库修过一次的 bug）。
       true,
     )
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw failureOf(response, text)
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'grok' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      throw failureOf(reply, text)
     }
-    yield* translateGrokStream(response, { signal })
+    yield* translateGrokStream(reply, { signal })
   },
 }
 

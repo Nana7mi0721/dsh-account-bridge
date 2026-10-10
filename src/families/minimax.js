@@ -31,6 +31,8 @@ import { chmod, readFile, rename, writeFile } from 'node:fs/promises'
 import { homedir } from 'node:os'
 import { join } from 'node:path'
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, translateAnthropicStream } from '../wire/anthropic.js'
+import { assertApiReply } from '../wire/assert-reply.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { httpError } from '../wire/http-error.js'
 import { firstPositiveNumber, tryJson, withSource } from '../util.js'
 
@@ -475,10 +477,12 @@ export const minimaxFamily = {
       payload.proxy,
       true,
     )
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw httpError(response, text, 'minimax')
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'minimax' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      throw httpError(reply, text, 'minimax')
     }
-    yield* translateAnthropicStream(response, { signal })
+    yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
   },
 }

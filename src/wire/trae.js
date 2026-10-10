@@ -18,6 +18,7 @@
 
 import { createDecipheriv, createHash, randomBytes } from 'node:crypto'
 import { readSse } from './sse.js'
+import { mergeUsageNonZero } from './usage.js'
 import { tryJson } from '../util.js'
 import { httpError } from './http-error.js'
 
@@ -929,7 +930,11 @@ export async function* translateTraeStream(response, options = {}) {
   const unknownEvents = new Map()
   let emitted = false
   let finished = false
-  let usageEmitted = false
+  // usage 是**累积**的，最后只发一帧。宿主的读法是 `this._usage = chunk.usage`
+  // （`dsh-llm/lib/index.js:998-999`）——**后一帧整体替换前一帧**。上游的
+  // `token_usage` 事件可以来好几次，每次只报一部分（先报 prompt、再报 completion），
+  // 所以「一帧一帧往外发」等于让最后那帧把前面的读数冲掉。
+  let usage = {}
   let nextIndex = 0
   let sawToolCalls = false
 
@@ -959,11 +964,7 @@ export async function* translateTraeStream(response, options = {}) {
       throw streamError(Number(event.payload.code), event.payload.extra)
     }
     if (event.kind === 'usage') {
-      const usage = usageFromEvent(event.payload)
-      if (Object.keys(usage).length > 0) {
-        usageEmitted = true
-        yield { type: 'usage', usage }
-      }
+      usage = mergeUsageNonZero(usage, usageFromEvent(event.payload))
       continue
     }
     if (event.kind === 'delta') {
@@ -1015,7 +1016,7 @@ export async function* translateTraeStream(response, options = {}) {
           else yield { type: 'block-end', index, block: { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments === '' ? '{}' : block.arguments } }
         }
       }
-      if (!usageEmitted) yield { type: 'usage', usage: {} }
+      yield { type: 'usage', usage }
       yield { type: 'finish', reason: { kind: finishKind(event.finishReason, { hasToolCalls: sawToolCalls }) } }
       continue
     }
@@ -1034,7 +1035,7 @@ export async function* translateTraeStream(response, options = {}) {
       else if (block.kind === 'reasoning') yield { type: 'block-end', index, block: { type: 'reasoning', text: block.text } }
       else yield { type: 'block-end', index, block: { type: 'tool-call', id: block.id, name: block.name, arguments: block.arguments === '' ? '{}' : block.arguments } }
     }
-    if (!usageEmitted) yield { type: 'usage', usage: {} }
+    yield { type: 'usage', usage }
     yield { type: 'finish', reason: { kind: finishKind(undefined, { hasToolCalls: sawToolCalls }) } }
   }
 }

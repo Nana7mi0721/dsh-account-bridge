@@ -476,9 +476,11 @@ test('sse: translates text, reasoning, usage and finish in contract order', asyn
   assert.deepEqual(chunks[2], { type: 'text-delta', index: 0, text: 'lo' })
   assert.deepEqual(chunks[3], { type: 'block-start', index: 1, blockType: 'reasoning' })
   assert.deepEqual(chunks[4], { type: 'reasoning-delta', index: 1, text: 'thinking' })
-  assert.deepEqual(chunks[5], { type: 'usage', usage: { inputTokens: 11, outputTokens: 4, cachedInputTokens: 2 } })
-  assert.deepEqual(chunks[6], { type: 'block-end', index: 0, block: { type: 'text', text: 'Hello' } })
-  assert.deepEqual(chunks[7], { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'thinking' } })
+  assert.deepEqual(chunks[5], { type: 'block-end', index: 0, block: { type: 'text', text: 'Hello' } })
+  assert.deepEqual(chunks[6], { type: 'block-end', index: 1, block: { type: 'reasoning', text: 'thinking' } })
+  // usage 一路走到收尾才发：宿主是 `this._usage = chunk.usage`（整体替换），
+  // 事件到达时就发的写法会让后到的半份读数覆盖前面的。
+  assert.deepEqual(chunks[7], { type: 'usage', usage: { inputTokens: 11, outputTokens: 4, cachedInputTokens: 2 } })
   assert.deepEqual(chunks[8], { type: 'finish', reason: { kind: 'stop' } })
 })
 

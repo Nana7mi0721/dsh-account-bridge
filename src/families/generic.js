@@ -30,6 +30,8 @@
  * @module dsh-account-bridge/families/generic
  */
 
+import { assertApiReply } from '../wire/assert-reply.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { httpError } from '../wire/http-error.js'
 import {
   normaliseUsage,
@@ -444,8 +446,10 @@ export const genericFamily = {
         { method: 'POST', headers: headersOf(auth, compat, { json: true, stream: true }), body: JSON.stringify(body), signal },
         proxy,
       )
-      if (!response.ok) throw httpError(response, await response.text().catch(() => ''), 'generic')
-      yield* translateAnthropicStream(response, { signal })
+      // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+      const reply = await assertApiReply(response, { who: 'generic' })
+      if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), 'generic')
+      yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
       return
     }
 
@@ -466,8 +470,10 @@ export const genericFamily = {
       proxy,
       true,
     )
-    if (!response.ok) throw httpError(response, await response.text().catch(() => ''), 'generic')
-    yield* translateChatStream(response, { signal })
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'generic' })
+    if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), 'generic')
+    yield* translateChatStream(reply, { signal })
   },
 }
 

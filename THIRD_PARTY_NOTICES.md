@@ -38,6 +38,18 @@
 |---|---|---|---|
 | `core/internal/accountauth/claude_identity.go` | `src/wire/identity.js`、`src/families/claude.js`、`src/families/codex.js`、`src/families/grok.js` | 会话标识按账号分命名空间（`sha256` 派生后置成 UUIDv4 形状）、每个账号一个稳定设备标识、`metadata.user_id` 的两种形态、「身份成套铺」的清理顺序 | Go → JS 重写。**改了两处**：① 命名空间由「上游服务 id」改为「族 + 本插件的账号 id」（我们的账号 id 才是区分同族两个账号的东西）；② 新增 `accountScopedSession` 作为三个族共用的唯一入口，避免身份头 / `metadata.user_id` / `prompt_cache_key` 三处各自派生。**该文件不链接 RelayKit**，已核对（`grep -l relaykit` 无命中）。 |
 
+### magpie（MIT，Copyright (c) 2026 yetone）
+
+来源：<https://github.com/yetone/magpie>，基线提交 `d7a1b02`。
+
+| 上游文件 | 用在本仓 | 内容 | 修改 |
+|---|---|---|---|
+| `internal/gateway/notapi.go` | `src/wire/assert-reply.js` | `notAnAPIReply`：2xx 却不是 API 回复的判定顺序（Content-Type 是 HTML 直接拒；body 首字节即 EOF 拒；`Content-Encoding` 非 `identity` 时跳过全部嗅探；HTML 特征命中且 CT 不含 `xml` 才拒；CT 含 `json` 但首字节不是 `{`/`[` 才拒）、`htmlStart` 正则、以及「只 `Peek` 一次、绝不为了嗅探把缓冲攒满」 | Go → JS 重写。**改了两处**：① magpie 只处理 2xx（非 2xx 归它自己的分类器），我们对**非 2xx** 也加了一条最窄的检查（CT 是 `text/html` **且** body 真的是 HTML 文档开头）——因为我们的 `httpError` 会把 403 判成 AUTH 并把账号冷却 24 小时，于是「Cloudflare 拦了一下」会变成「这个账号令牌废了」；② magpie 把响应改写成 502 JSON，我们抛带 `code='NOT_AN_API_REPLY'` 的 Error，因为我们的分类器吃 `error.code`（归类为瞬时故障，换号但不罚账号）。 |
+
+### RelayKit / new-api（AGPL-3.0，Copyright QuantumNous）
+
+见文末「只学规格、未借用代码」——AGPL 的来源不进「借用的代码」这一节。
+
 ## 计划借用（尚未落地，落地时连同头部注释一起移入上一节）
 
 > 这些行**不受** `test/notices.test.js` 强制，因为文件还不存在。它们记录的是意图，
@@ -50,7 +62,6 @@
 | 上游文件 | 计划用在本仓 | 内容 | 计划怎么改 |
 |---|---|---|---|
 | `internal/gateway/fallback.go` | `src/pool.js` | 保流窗口的三个上限（等首段内容 / 只有思考时），以及「哪个厂商会在只思考之后用安全策略拒绝」的判据 | Go → JS 重写；常量语义照搬，注释改写为中文并保留 issue 编号 |
-| `internal/gateway/notapi.go` | `src/wire/assert-reply.js` | `notAnAPIReply`：2xx 但不是 API 回复的判定顺序（含压缩流跳过嗅探、XML 放过两条例外） | Go → JS 重写 |
 | `internal/gateway/routing.go` | `src/health.js`、`src/select.js` | 退避常量表、429 文本分流、额度分档与「重置最快优先」、「相差 1/10 视为同档」的离散分带 | Go → JS 重写 |
 | `internal/gateway/sink.go` | `src/select.js` | 被限流（而非额度用尽）的账号沉到路由末尾，以及「沉得早的排在沉得晚的前面」 | Go → JS 重写 |
 | `internal/gateway/affinity.go` | `src/affinity.js` | 会话粘性的跨轮保持判据（按上游实际回报的缓存读取量，而不是固定 TTL） | Go → JS 重写 |
@@ -77,4 +88,8 @@
 以下来源我们**只借鉴了设计与规则**（事实性的字段名、常量、判定顺序），没有复制任何可执行表达：
 
 - **RelayKit**（`QuantumNous/new-api/relaykit`，**AGPL-3.0**）：结构化诊断的形状与两个严重级别、未知停止原因原样透传、usage 合并的「非零才覆盖」规则、golden 快照的组织方式。
+  - 落地处：usage 合并规则在 `src/wire/usage.js`（含上游没有的惰性拷贝与 `mergeUsageFrames`）。
+  - **为什么这是「只学规格」而不是「借用」**：规则本身是协议事实（「分片上报的计数要合并」不是任何人的表达），换个语言、换个数据结构重写不构成衍生；本仓没有引入它的任何源码、常量表、诊断码清单或数据结构（`relaykit/` 是 Go 模块，与本仓技术栈也不同），也没有采用它最重的那部分（`toolconv` 的 hosted-tool 全矩阵、`relayconvert` 的协议 IR）——那是聚合网关的业务面，不是账号级反代需要的。
+  - `src/wire/usage.js` 的头部注释里**故意不提**它的名字：`test/notices.test.js` 有一条反向守卫，任何登记在「借用的代码」里的文件都不许出现 `relaykit`，而这个文件不属于那一节。
+  - 若将来要真正复制它的代码，就得改成与 magpie 同样的台账行，并且**整仓都受 AGPL-3.0 传染**；本仓的选择是不复制。
 - **AstrLink `docs/`**（Apache-2.0）：粘性可审计、上游身份铁律、未计价不猜。

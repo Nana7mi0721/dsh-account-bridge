@@ -26,6 +26,8 @@ import { join } from 'node:path'
 import { createPkce, createState, startLoopback } from '../login/loopback.js'
 import { resolveCliVersion } from '../cli-version.js'
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, translateAnthropicStream } from '../wire/anthropic.js'
+import { assertApiReply } from '../wire/assert-reply.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { httpError } from '../wire/http-error.js'
 import {
   CLAUDE_CODE_SESSION_HEADER,
@@ -303,11 +305,14 @@ export const claudeFamily = {
       payload.proxy,
       true,
     )
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw httpError(response, text, 'claude')
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    // 不认出来的话，网页会被当 SSE 解析，最后抛一个和真正原因无关的解析错。
+    const reply = await assertApiReply(response, { who: 'claude' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      throw httpError(reply, text, 'claude')
     }
-    yield* translateAnthropicStream(response, { signal })
+    yield* translateAnthropicStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
   },
 }
 

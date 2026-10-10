@@ -21,6 +21,8 @@
  * @module dsh-account-bridge/wire/agy
  */
 
+import { mergeUsageNonZero } from './usage.js'
+
 /** 把 `agy models` 的表格输出解析成 `[{id, name}]`。 */
 export function parseModels(stdout) {
   const models = []
@@ -140,7 +142,7 @@ export async function* translateAgyStream(lines) {
     if (event.event === 'step_update') {
       const step = event.step_update ?? {}
       conversationId ??= firstString(step.conversation_id)
-      if (step.usage && typeof step.usage === 'object') usage = step.usage
+      if (step.usage && typeof step.usage === 'object') usage = mergeUsageNonZero(usage, step.usage)
       // 只认 agent_response：user_input / tool / error_message 都不是给用户看的正文。
       if (step.step_type !== 'agent_response') continue
       const delta = typeof step.text_delta === 'string' ? step.text_delta : ''
@@ -155,7 +157,7 @@ export async function* translateAgyStream(lines) {
       const result = event.result ?? {}
       sawResult = true
       conversationId ??= firstString(result.conversation_id)
-      if (result.usage && typeof result.usage === 'object') usage = result.usage
+      if (result.usage && typeof result.usage === 'object') usage = mergeUsageNonZero(usage, result.usage)
       if (result.status === 'ERROR') failure = firstString(result.error) ?? 'agy reported an error'
       // `result.response` 是最终完整文本。若它比我们流出来的长（中间步骤被静默、
       // 或者增量事件丢了），补上缺的那一截 —— 绝不静默少给正文。

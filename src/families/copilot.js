@@ -79,6 +79,7 @@ import {
   requestDeviceCode,
   requestWithEditorVersion,
 } from '../wire/copilot.js'
+import { assertApiReply } from '../wire/assert-reply.js'
 import { translateChatStream } from '../wire/chat-completions.js'
 import { redact, sleep, tryJson } from '../util.js'
 
@@ -411,10 +412,12 @@ export const copilotFamily = {
         },
       },
     })
-    if (!response.ok) {
-      const text = await response.text().catch(() => '')
-      throw copilotError(response, text, 'copilot')
+    // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
+    const reply = await assertApiReply(response, { who: 'copilot' })
+    if (!reply.ok) {
+      const text = await reply.text().catch(() => '')
+      throw copilotError(reply, text, 'copilot')
     }
-    yield* translateChatStream(response, { signal })
+    yield* translateChatStream(reply, { signal })
   },
 }
