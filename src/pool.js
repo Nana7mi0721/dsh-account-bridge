@@ -16,12 +16,20 @@
 
 import { accountKey, classifyFailure, memberKey } from './health.js'
 import { carryFailure, carryingFailures } from './failure.js'
+import { decayUsage, rankCandidates, usageNow } from './select.js'
 import { redact } from './util.js'
 
 /** 池装配的缓存时长：`owns()` 每次选模型都会跑，而装配要碰目录与账号存储。 */
 const POOL_CACHE_TTL_MS = 5_000
 /** 单账号模型目录的缓存时长。 */
 const CATALOG_TTL_MS = 10 * 60_000
+/**
+ * 额度快照的缓存时长。额度变得慢，问太勤反而会撞上游的额度端点——有的族为了读额度
+ * 要跑一次本机 CLI，那是有成本的。
+ */
+const ALLOWANCE_TTL_MS = 5 * 60_000
+/** 额度查询失败后的重试间隔。比成功长，免得把一个坏掉的额度端点打成重试风暴。 */
+const ALLOWANCE_RETRY_MS = 60_000
 /** 粘性会话表的上限与 TTL。 */
 const STICKY_LIMIT = 1000
 const STICKY_TTL_MS = 30 * 60_000
@@ -112,6 +120,21 @@ export class AccountBridgeAdapter {
   #pools = new Map()
   #sticky = new Map()
   #inflightRefresh = new Map()
+  /**
+   * 额度快照：`<族>/<账号>` → `{ at, windows }`。
+   * **读不到就是「未知」，与「用完了」严格区分**：`remainingFraction: 0` 是真实读数，
+   * 必须原样保留；一条读数都没有的账号只是我们没问到。
+   */
+  #allowances = new Map()
+  /** 额度查询的去重表：同一账号同时在飞的查询只发一次。 */
+  #allowanceInflight = new Map()
+  /** 额度查询失败后的下次可试时刻。 */
+  #allowanceRetryAt = new Map()
+  /** 近期用量（已按半衰期衰减）：`<族>/<账号>` → `{ at, weight }`。 */
+  #usage = new Map()
+  /** 沉的序号：`<族>/<账号>` → 序号。>0 表示「还有额度却吃过限流」。 */
+  #sunk = new Map()
+  #sunkSeq = 0
   #hold
 
   constructor({ ctx, store, health, families, log, hold }) {
@@ -234,6 +257,8 @@ export class AccountBridgeAdapter {
       seen.add(entry.modelId)
       models.push({ ...entry.model, provider: family.route, id: entry.modelId })
     }
+    // 额度是后台尽力而为读来的：**装配与选择都不为它等待**。
+    this.#refreshAllowances(family, accounts)
     const value = { family, accounts, entries, models }
     this.#pools.set(key, { at: now, value, generation: this.#health.generation })
     return value
@@ -279,7 +304,7 @@ export class AccountBridgeAdapter {
 
       // 冷却中的账号不再重试刷新。目录没有「失败缓存」，所以没有这道闸的话，
       // 一条已经作废的刷新令牌会被**每一次** listModels 重新拿去打上游。
-      // 冷却时长沿用健康表里那套（AUTH 24h / QUOTA 5min / 其余 60s），与请求路径一致。
+      // 冷却时长由 `src/health.js` 算出来（见那里的常量表），与请求路径同一套。
       const cooling = this.#health.why(family.id, accountId, '*')
       if (cooling && cooling.until > Date.now()) {
         const error = new Error(`account-bridge: ${accountId} is cooling down (${cooling.reason})`)
@@ -325,42 +350,94 @@ export class AccountBridgeAdapter {
   // -------------------------------------------------------------- 调度
 
   /**
-   * 选一个账号来服务这次请求。
-   * 顺序：粘性命中 → 健康度 → 目录里真有这个模型的账号。
+   * 把一个候选账号变成 `select.js` 要的形状。
+   *
+   * 额度是**后台尽力而为**读来的快照（见 `#refreshAllowances`）：选择本身**永不**为它
+   * 等待，读不到就是「未知」，与「用完了」严格区分。
    */
-  async #pick(family, model, options) {
-    const pool = await this.#pool(family, options.signal)
-    const candidates = pool.entries.filter((entry) => entry.modelId === model)
-    if (candidates.length === 0) {
-      if (pool.accounts.length === 0) {
-        const error = new Error(`account-bridge: no ${family.id} account signed in yet`)
-        error.code = 'MISSING_CREDENTIAL'
-        throw error
-      }
-      const error = new Error(`account-bridge: no ${family.id} account offers model "${model}"`)
-      error.code = 'NO_ADAPTER'
-      throw error
+  #candidateOf(family, entry, now) {
+    const key = accountKey(family.id, entry.account.id)
+    const snapshot = this.#allowances.get(key)
+    const windows = []
+    for (const window of snapshot?.windows ?? []) {
+      const remaining = Number(window?.remainingFraction)
+      if (!Number.isFinite(remaining)) continue
+      windows.push({
+        used: (1 - Math.min(1, Math.max(0, remaining))) * 100,
+        ...(Number.isFinite(window?.resetAt) ? { resetsAt: window.resetAt } : {}),
+      })
     }
+    return {
+      id: entry.account.id,
+      entry,
+      windows,
+      /**
+       * **额度未知、但这一族读得出额度** ⇒ 先让它答一次，只到我们读到为止。
+       * 否则它永远排在已知账号后面，也就永远不会被知道。
+       * 已经问过但上游什么都没说的（快照存在、窗口为空）不再走这条通道。
+       */
+      learns: snapshot === undefined && typeof family.quota === 'function',
+      usedRecently: usageNow(this.#usage.get(key), now),
+      sunk: this.#sunk.get(key) ?? 0,
+    }
+  }
 
-    const stickyKey = this.#stickyKey(family, model, options)
-    const pinned = stickyKey ? this.#sticky.get(stickyKey) : undefined
+  /**
+   * 后台把每个账号的额度读一遍。**不 await、不抛错**。
+   *
+   * 额度是加分项：读不到就只是「未知」，不能让一次额度查询拖慢或弄坏一次真实请求，
+   * 也不能让它变成对额度端点的重试风暴（失败后隔 `ALLOWANCE_RETRY_MS` 再试）。
+   */
+  #refreshAllowances(family, accounts) {
+    if (typeof family.quota !== 'function') return
     const now = Date.now()
-    const healthy = []
-    for (const candidate of candidates) {
-      if (!this.#health.available(family.id, candidate.account.id, model, now)) continue
-      healthy.push(candidate)
+    for (const account of accounts) {
+      const key = accountKey(family.id, account.id)
+      const snapshot = this.#allowances.get(key)
+      if (snapshot && now - snapshot.at < ALLOWANCE_TTL_MS) continue
+      if ((this.#allowanceRetryAt.get(key) ?? 0) > now) continue
+      if (this.#allowanceInflight.has(key)) continue
+      const task = (async () => {
+        const payload = await this.#freshPayload(family, account)
+        const windows = await family.quota(this.#ctx, payload, undefined)
+        if (Array.isArray(windows)) this.#allowances.set(key, { at: Date.now(), windows })
+        this.#allowanceRetryAt.delete(key)
+      })()
+        .catch((error) => {
+          this.#allowanceRetryAt.set(key, Date.now() + ALLOWANCE_RETRY_MS)
+          this.#log?.debug?.(
+            'account-bridge: reading the allowance of %s failed (%s)',
+            key,
+            redact(String(error?.code ?? error?.message ?? error)),
+          )
+        })
+        .finally(() => {
+          this.#allowanceInflight.delete(key)
+        })
+      this.#allowanceInflight.set(key, task)
     }
-    const usable = healthy.length > 0 ? healthy : candidates
+  }
 
-    if (pinned) {
-      const hit = usable.find((entry) => entry.account.id === pinned)
-      if (hit) return { entry: hit, stickyKey, reason: 'sticky' }
-    }
-    // 未钉住时：优先挑「该账号的其他模型没在被用」的账号，实现负载摊开
-    usable.sort((a, b) => a.account.id.localeCompare(b.account.id))
-    const chosen = usable[0]
-    if (stickyKey) this.#rememberSticky(stickyKey, chosen.account.id, now)
-    return { entry: chosen, stickyKey, reason: pinned ? 'sticky-miss' : 'fresh' }
+  /** 记一次成功的请求，用于「并列时先挑近期用得少的」。 */
+  #noteUsage(family, accountId, now = Date.now()) {
+    const key = accountKey(family.id, accountId)
+    this.#usage.set(key, decayUsage(this.#usage.get(key), now, 1))
+  }
+
+  /**
+   * 把一个「还有额度却吃了限流」的账号沉到末尾。
+   *
+   * 要解决的问题（magpie 的 Sink，来自一个 WorkBuddy 用户的实际投诉）：一个账号被
+   * 打到限流、冷却一结束又立刻被灌满请求——**这正是风控最容易注意到的形状**。
+   * 沉过之后它排到所有没沉过的账号后面，只有等前面的也都被限流过才回到最前。
+   *
+   * **额度用尽与欠费不沉**：那两种是「它现在确实不能用」，不是「我们在某个账号上
+   * 打得太急」。只增不减，重启即忘。
+   */
+  #sinkAccount(family, accountId) {
+    const key = accountKey(family.id, accountId)
+    this.#sunkSeq += 1
+    this.#sunk.set(key, this.#sunkSeq)
   }
 
   /**
@@ -467,18 +544,29 @@ export class AccountBridgeAdapter {
     const stickyKey = this.#stickyKey(family, model, options)
     const conversation = this.#conversationId(options)
     const pinned = stickyKey ? this.#sticky.get(stickyKey) : undefined
+    const now = Date.now()
     const ordered = []
     const seen = new Set()
-    for (const candidate of candidates) {
-      if (pinned && candidate.account.id === pinned) {
-        ordered.push(candidate)
-        seen.add(candidate.account.id)
+    if (pinned) {
+      const hit = candidates.find((candidate) => candidate.account.id === pinned)
+      if (hit) {
+        ordered.push(hit)
+        seen.add(hit.account.id)
       }
     }
-    for (const candidate of candidates) {
-      if (seen.has(candidate.account.id)) continue
-      if (this.#health.available(family.id, candidate.account.id, model)) ordered.push(candidate)
-    }
+    // 顺序由 `select.js` 决定：额度分档 → 剩余额度撑多久 → 重置时间 → 近期用量 → id。
+    // 额度未知、而这一族又读得出额度的账号，只在还没读到过时排到最前（`learns`）。
+    const ready = candidates.filter(
+      (candidate) =>
+        !seen.has(candidate.account.id) &&
+        this.#health.available(family.id, candidate.account.id, model, now),
+    )
+    const ranked = rankCandidates(
+      ready.map((entry) => this.#candidateOf(family, entry, now)),
+      now,
+    )
+    for (const candidate of ranked.order) ordered.push(candidate.entry)
+    // 冷却中的排最后，但**永不剔除**：前面的全都试完了，照样试它一次。
     for (const candidate of candidates) {
       if (!ordered.includes(candidate)) ordered.push(candidate)
     }
@@ -593,11 +681,14 @@ export class AccountBridgeAdapter {
           throw error
         }
         this.#health.clear(family.id, accountId, model)
+        this.#noteUsage(family, accountId)
         return
       } catch (error) {
         lastError = error
         const verdict = classifyFailure(error, family.id)
         const recorded = this.#health.record(family.id, accountId, model, verdict)
+        // 「还有额度却吃了限流」⇒ 这个账号沉到末尾。额度用尽与欠费不沉（不是我们的问题）。
+        if (verdict.backoff === 'rate') this.#sinkAccount(family, accountId)
         this.#log?.warn?.(
           'account-bridge: %s/%s failed (%s%s), %s',
           family.id,
@@ -644,15 +735,23 @@ export class AccountBridgeAdapter {
 
   /** 账号变化后让池缓存立刻作废。 */
   invalidate(familyId) {
-    if (familyId) {
-      this.#pools.delete(familyId)
-      for (const key of [...this.#catalogs.keys()]) {
-        if (key.startsWith(`${familyId}/`)) this.#catalogs.delete(key)
+    const drop = (map) => {
+      if (!familyId) {
+        map.clear()
+        return
       }
-      return
+      for (const key of [...map.keys()]) {
+        if (key.startsWith(`${familyId}/`)) map.delete(key)
+      }
     }
-    this.#pools.clear()
-    this.#catalogs.clear()
+    if (familyId) this.#pools.delete(familyId)
+    else this.#pools.clear()
+    drop(this.#catalogs)
+    // 账号换过（加/删/停用/改代理）之后，之前读到的额度可能已经不是同一个出口的读数。
+    // `#sunk` 与 `#usage` **不在这里清**：它们记的是「这个账号被限流过」「它最近被用得多」，
+    // 换代理不会让这两件事没发生过（magpie 的 Sink 也是「记住到重启为止」）。
+    drop(this.#allowances)
+    drop(this.#allowanceRetryAt)
   }
 
   /** 健康状态变化（例如手动解冻）后让模型列表重新算。 */
@@ -699,6 +798,8 @@ export class AccountBridgeAdapter {
       pools: [...this.#pools.keys()],
       catalogs: [...this.#catalogs.keys()],
       sticky: this.#sticky.size,
+      allowances: [...this.#allowances.keys()],
+      sunk: [...this.#sunk.entries()].map(([key, seq]) => `${key}#${seq}`),
       health: this.#health.snapshot(),
     }
   }
