@@ -8,7 +8,11 @@
  * - 额度重置**只读 body 字段**，绝不读 `x-codex-*-reset-after-seconds` 响应头
  *   （那是窗口滚动快照，误读会把几秒的 429 停成几小时）；
  * - 模型目录要丢 `visibility` 为 hide/none 的项，并丢掉 effort `ultra`
- *   （Responses API 收到会 400）。
+ *   （Responses API 收到会 400）；
+ * - `prompt_cache_key` **按账号派生**（不是调用方原始会话 id），见 `src/wire/identity.js`。
+ *
+ * 身份命名空间那套派生借自 AstrLink `core/internal/accountauth/claude_identity.go`
+ * （Apache-2.0），见 THIRD_PARTY_NOTICES.md。
  * @module dsh-account-bridge/families/codex
  */
 
@@ -19,7 +23,16 @@ import { createPkce, createState, startLoopback } from '../login/loopback.js'
 import { httpError } from '../wire/http-error.js'
 import { toResponsesInput, toResponsesTools, translateResponsesStream } from '../wire/responses.js'
 import { resolveCliVersion } from '../cli-version.js'
+import { accountScopedSession } from '../wire/identity.js'
 import { decodeJwtPayload, firstPositiveNumber, randomId, tryJson, withSource } from '../util.js'
+
+/** 身份命名空间用的族名（与 `family.id` 一致；写死是为了改 id 时会当场露馅）。 */
+const IDENTITY_FAMILY = 'codex'
+
+/** 会话级的缓存亲和键；拿不到账号或会话时返回 undefined（宁可不发）。 */
+function scopeCacheKey(account, session) {
+  return accountScopedSession(IDENTITY_FAMILY, account?.id, session)
+}
 
 export const CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann'
 export const AUTHORIZE_URL = 'https://auth.openai.com/oauth/authorize'
@@ -269,8 +282,11 @@ export const codexFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, signal } = options
+    const { payload, model, messages, tools, effort, signal, account, session } = options
     const { instructions, input } = toResponsesInput(messages)
+    // 缓存亲和键：**按账号派生**，与身份命名空间同一套派生（见 wire/identity.js）。
+    // 不发裸会话 id —— 那会让上游看到「同一段对话从两个安装打过来」。
+    const cacheKey = scopeCacheKey(account, session)
     const body = {
       model,
       instructions,
@@ -281,6 +297,7 @@ export const codexFamily = {
       store: false,
       stream: true,
       include: [],
+      ...(cacheKey ? { prompt_cache_key: cacheKey } : {}),
       ...(effort ? { reasoning: { effort, summary: 'auto' } } : {}),
     }
     const response = await ctx.fetch(

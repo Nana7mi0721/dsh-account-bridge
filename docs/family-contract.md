@@ -208,9 +208,29 @@ discover(ctx) // → Array<{ family, sourcePath, label, importable, externallyOw
 
 ```js
 async *stream(ctx, options) {
-  // options = { payload, model, messages, tools, effort, system, maxTokens, signal }
+  // options = { payload, model, messages, tools, effort, system, maxTokens, signal,
+  //             account, session }
 }
 ```
+
+`account` 与 `session` 是给**上游身份**用的，两个都可以是 `undefined`：
+
+| 字段 | 形状 | 用途 |
+|---|---|---|
+| `account` | `{ id, label }` | `id` 是账号池里的账号 id（如 `claude-1`）。**按账号分命名空间靠它** |
+| `session` | `string \| undefined` | 调用方那段对话的**裸** id（会话里第一条 user 消息的 id）。**不许原样发给上游** |
+
+**规矩：`session` 必须经 `accountScopedSession(family, account.id, session)` 派生后再发**
+（见 `src/wire/identity.js`）。为什么要派生、以及「身份要么整套铺、要么一个都别铺」，
+那两段说明在 `src/wire/identity.js` 的文件头。一句话版本：
+
+- 发**裸** id ⇒ 上游看到「同一段对话从两个安装打过来」，一次换号就把两个账号连起来了；
+- 每轮换一个 id ⇒ 上游 prompt cache 全废，你每次都付全量输入的钱；
+- 派生值 ⇒ 同账号同会话稳定（缓存还在），跨账号不同（不连坐）。
+
+需要发这个标识的字段有三处，**三处必须是同一个值**：
+`x-claude-code-session-id`（头）、`metadata.user_id`（体）、`prompt_cache_key`（体）。
+拿不到 `account` 或 `session` 时**一个都不发**，也不要退回去发裸 id。
 
 最省事的写法是复用一个翻译层：
 
@@ -409,6 +429,8 @@ test('...', { skip: process.env.BRIDGE_LIVE_FOO !== '1' }, async () => { … })
 - [ ] 没有 `export default`
 - [ ] `route` 没和别的族撞
 - [ ] 上游调用一律 `ctx.fetch(url, init, payload.proxy)`
+- [ ] 发了任何会话标识时，它来自 `accountScopedSession(...)`，**不是** `options.session` 原样
+      （三处一致：会话头 / `metadata.user_id` / `prompt_cache_key`）
 - [ ] `refresh` 返回的是 **auth 对象**，且带全所有会变的键
 - [ ] 一次性轮换的令牌有写回，且有 generation CAS
 - [ ] 没有的证据写「未知」，没有的额度不报，不支持的多账号不假装支持

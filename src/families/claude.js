@@ -10,6 +10,13 @@
  * - **`display: 'summarized'` 必须显式写**：adaptive 型模型默认 `omitted`，
  *   于是思考块有内容但 `thinking` 字段是空的，面板永远空白；
  * - **`tools` 要按名字排序**，它渲染在缓存前缀最前面，顺序一变整段 prompt cache 失效。
+ *
+ * 身份（`x-app` / `x-claude-code-session-id` / `metadata.user_id`）**成套**发，且会话标识
+ * **按账号派生**——同一段对话换到另一个账号时上游看到的是另一台安装，不会把两个账号连起来。
+ * 见 `src/wire/identity.js`。
+ *
+ * 身份命名空间那套派生借自 AstrLink `core/internal/accountauth/claude_identity.go`
+ * （Apache-2.0），见 THIRD_PARTY_NOTICES.md。
  * @module dsh-account-bridge/families/claude
  */
 
@@ -20,7 +27,18 @@ import { createPkce, createState, startLoopback } from '../login/loopback.js'
 import { resolveCliVersion } from '../cli-version.js'
 import { toAnthropicMessages, toAnthropicSystem, toAnthropicTools, translateAnthropicStream } from '../wire/anthropic.js'
 import { httpError } from '../wire/http-error.js'
+import {
+  CLAUDE_CODE_SESSION_HEADER,
+  accountScopedSession,
+  applyIdentityHeaders,
+  claudeMetadataUserId,
+  deviceId,
+  isUuid,
+} from '../wire/identity.js'
 import { firstPositiveNumber, tryJson, withSource } from '../util.js'
+
+/** 身份命名空间用的族名（与 `family.id` 一致；写死是为了改 id 时会当场露馅）。 */
+const IDENTITY_FAMILY = 'claude'
 
 export const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 export const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
@@ -255,16 +273,20 @@ export const claudeFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, system, maxTokens, signal } = options
+    const { payload, model, messages, tools, effort, system, maxTokens, signal, account, session } = options
+    const auth = payload.auth ?? {}
     const capabilities = capabilityCache.get(model)
     const thinkingType = claudeThinkingType(capabilities)
     const limit = Math.max(1_024, Number(maxTokens) || 0 || DEFAULT_MAX_TOKENS)
+    const scoped = scopeSession(account, session)
     const body = {
       model,
       max_tokens: limit,
       system: toAnthropicSystem(system, messages),
       messages: toAnthropicMessages(messages),
       stream: true,
+      // 会话身份与请求头里的 `x-claude-code-session-id` 是**同一个值**（见 requestHeaders）。
+      ...(scoped ? { metadata: claudeMetadata(account, auth, scoped) } : {}),
       ...(tools?.length ? { tools: toAnthropicTools(tools), tool_choice: { type: 'auto' } } : {}),
       ...(thinkingParam(thinkingType, limit) ? { thinking: thinkingParam(thinkingType, limit) } : {}),
       // `output_config.effort` 只在该模型自己声明支持时发，否则上游 400。
@@ -274,7 +296,7 @@ export const claudeFamily = {
       MESSAGES_URL,
       {
         method: 'POST',
-        headers: requestHeaders(payload.auth ?? {}, ctx, { json: true, stream: true }),
+        headers: requestHeaders(auth, ctx, { json: true, stream: true, account, session }),
         body: JSON.stringify(body),
         signal,
       },
@@ -381,7 +403,13 @@ async function readClaudeAccountEmail() {
   return undefined
 }
 
-/** 登录后拉一次 profile（**纯装饰**：失败不能影响登录）。 */
+/**
+ * 登录后拉一次 profile（**纯装饰**：失败不能影响登录）。
+ *
+ * 顺手把 `account.uuid` 记进凭据——身份头里的 `account_uuid` 只有从这里能拿到。
+ * 拿不到就留空（`claudeMetadataUserId` 会把它发成空串），**不猜、不合成**：
+ * 一个假的账号 UUID 比一个空值更像伪造。
+ */
 async function fetchProfileEmail(ctx, auth, signal) {
   try {
     const response = await ctx.fetch(
@@ -391,17 +419,23 @@ async function fetchProfileEmail(ctx, auth, signal) {
     if (!response.ok) return undefined
     const json = await response.json()
     auth.subscriptionType = json?.account?.subscription_type ?? auth.subscriptionType
+    const uuid = json?.account?.uuid
+    if (isUuid(uuid)) auth.accountUuid = uuid.toLowerCase()
     return json?.account?.email ?? json?.email ?? undefined
   } catch {
     return undefined
   }
 }
 
-/** 上游请求头。`user-agent` 的形态决定会不会被限流、能不能拿到新模型。 */
-function requestHeaders(auth, ctx, { json = false, stream = false, usage = false } = {}) {
+/**
+ * 上游请求头。`user-agent` 的形态决定会不会被限流、能不能拿到新模型。
+ *
+ * 身份**成套**铺：`applyIdentityHeaders` 先清掉外来 SDK 指纹，再铺我们自己的。
+ * 会话头只在真的有一轮对话时发（`session` 有值）——列目录和查额度不是一个会话。
+ */
+function requestHeaders(auth, ctx, { json = false, stream = false, usage = false, account, session } = {}) {
   const headers = {
     authorization: `Bearer ${auth.access ?? ''}`,
-    'user-agent': `claude-cli/${resolveCliVersion(ctx, 'claude')} (external, cli)`,
     accept: stream ? 'text/event-stream' : 'application/json',
   }
   if (json) headers['content-type'] = 'application/json'
@@ -413,7 +447,35 @@ function requestHeaders(auth, ctx, { json = false, stream = false, usage = false
     headers['anthropic-beta'] = BETA
     headers['anthropic-dangerous-direct-browser-access'] = 'true'
   }
-  return headers
+  const identity = {
+    'user-agent': `claude-cli/${resolveCliVersion(ctx, 'claude')} (external, cli)`,
+    'x-app': 'cli',
+  }
+  const scoped = scopeSession(account, session)
+  if (scoped) identity[CLAUDE_CODE_SESSION_HEADER] = scoped
+  return applyIdentityHeaders(headers, identity)
+}
+
+/**
+ * 把调用方会话映射进**这个账号**的命名空间。
+ *
+ * 拿不到账号或会话时返回 `undefined` —— 这时**一个身份字段都不发**，而不是退回去发裸会话 id。
+ * 发裸 id 会把「同一段对话在不同账号之间漂移」这件事直接告诉上游，比不发更糟。
+ */
+function scopeSession(account, session) {
+  return accountScopedSession(IDENTITY_FAMILY, account?.id, session)
+}
+
+/** `metadata.user_id`：设备标识按账号派生，`account_uuid` 只认真 UUID。 */
+function claudeMetadata(account, auth, scoped) {
+  if (!scoped) return undefined
+  return {
+    user_id: claudeMetadataUserId({
+      device: deviceId(IDENTITY_FAMILY, account.id),
+      accountUuid: auth?.accountUuid,
+      session: scoped,
+    }),
+  }
 }
 
 /** 一项模型元数据。`capabilities` 决定 thinking 形状与可用的 effort。 */

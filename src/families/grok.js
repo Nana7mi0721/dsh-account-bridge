@@ -27,6 +27,10 @@
  *    `registration_endpoint`**，官方也没有第三方 public client 注册入口，
  *    所以只能用 Grok CLI 那个公开 client_id。`ctx.config.grokClientId`
  *    是留给上游轮换/吊销时的逃生舱，不是常规配置项。
+ *
+ * `prompt_cache_key` 按账号 + 会话派生（不是登录时那个账号级常量），见 `src/wire/identity.js`。
+ * 身份命名空间那套派生借自 AstrLink `core/internal/accountauth/claude_identity.go`
+ * （Apache-2.0），见 THIRD_PARTY_NOTICES.md。
  * @module dsh-account-bridge/families/grok
  */
 
@@ -51,7 +55,21 @@ import {
   translateGrokStream,
   fingerprintError,
 } from '../wire/grok.js'
+import { accountScopedSession } from '../wire/identity.js'
 import { decodeJwtPayload, tryJson, withSource } from '../util.js'
+
+/** 身份命名空间用的族名（与 `family.id` 一致；写死是为了改 id 时会当场露馅）。 */
+const IDENTITY_FAMILY = 'grok'
+
+/** 会话级的缓存亲和键；拿不到账号或会话时返回 undefined。 */
+function scopeCacheKey(account, session) {
+  return accountScopedSession(IDENTITY_FAMILY, account?.id, session)
+}
+
+/** 兜底：登录时生成的账号级缓存键（没有会话标识时用它）。 */
+function accountCacheKey(auth) {
+  return typeof auth?.cacheKey === 'string' && auth.cacheKey.length > 0 ? auth.cacheKey : undefined
+}
 
 // ------------------------------------------------------------------ 常量
 
@@ -399,7 +417,7 @@ export const grokFamily = {
   // ---------------------------------------------------------------- 调用
 
   async *stream(ctx, options) {
-    const { payload, model, messages, tools, effort, system, maxTokens, signal } = options
+    const { payload, model, messages, tools, effort, system, maxTokens, signal, account, session } = options
     const auth = payload.auth ?? {}
     const clientVersion = grokClientVersion(ctx)
     const kind = endpointKind(auth)
@@ -410,7 +428,9 @@ export const grokFamily = {
       system,
       maxTokens,
       // 缓存亲和键必须稳定：同一账号的同一段会话要一直落回同一个缓存分片（G7）。
-      promptCacheKey: typeof auth.cacheKey === 'string' && auth.cacheKey.length > 0 ? auth.cacheKey : undefined,
+      // **按会话派生**，不是「整个账号一个常量」——后者会让该账号上所有对话挤同一个分片。
+      // `auth.cacheKey` 只在拿不到会话时兜底（它是登录时生成的账号级随机值）。
+      promptCacheKey: scopeCacheKey(account, session) ?? accountCacheKey(auth),
       // effort 只在目录证明这个模型支持它时才发——猜一个档位会 400。
       effort: effortFor(model, effort) ? effort : undefined,
     })

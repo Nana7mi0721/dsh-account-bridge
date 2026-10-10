@@ -29,7 +29,14 @@
 
 > 每落地一个工作包，就把对应的行从下面「计划借用」移到本节。
 > **本节每一条都会被 `test/notices.test.js` 强制**：路径必须存在、文件头部必须注明来源。
-> 本节目前为空——P7 深度改进（W0–W11）尚未开始落地。
+
+### AstrLink（Apache-2.0，Copyright Calcium-Ion）
+
+来源：<https://github.com/Calcium-Ion/AstrLink>，基线提交 `5ceced5`。
+
+| 上游文件 | 用在本仓 | 内容 | 修改 |
+|---|---|---|---|
+| `core/internal/accountauth/claude_identity.go` | `src/wire/identity.js`、`src/families/claude.js`、`src/families/codex.js`、`src/families/grok.js` | 会话标识按账号分命名空间（`sha256` 派生后置成 UUIDv4 形状）、每个账号一个稳定设备标识、`metadata.user_id` 的两种形态、「身份成套铺」的清理顺序 | Go → JS 重写。**改了两处**：① 命名空间由「上游服务 id」改为「族 + 本插件的账号 id」（我们的账号 id 才是区分同族两个账号的东西）；② 新增 `accountScopedSession` 作为三个族共用的唯一入口，避免身份头 / `metadata.user_id` / `prompt_cache_key` 三处各自派生。**该文件不链接 RelayKit**，已核对（`grep -l relaykit` 无命中）。 |
 
 ## 计划借用（尚未落地，落地时连同头部注释一起移入上一节）
 
@@ -55,9 +62,7 @@
 
 来源：<https://github.com/Calcium-Ion/AstrLink>，基线提交 `5ceced5`。
 
-| 上游文件 | 计划用在本仓 | 内容 | 计划怎么改 |
-|---|---|---|---|
-| `core/internal/accountauth/claude_identity.go` | `src/util.js`、`src/families/claude.js` | 会话标识按账号分命名空间（并置成 UUID 形状）、每个账号一个稳定设备标识、`metadata.user_id` 的两种形态 | Go → JS 重写；**该文件不链接 RelayKit**，已核对 |
+> `claude_identity.go` 一行已于 W5 落地，见上面「借用的代码」。
 
 ### V1ki/dsh-plugin-subscriptions（MIT，Copyright (c) 2026 V1ki）
 

@@ -20,9 +20,14 @@ const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
 /**
  * Claude Code 的身份块。订阅端点的请求会带 `x-app: cli` 与 CLI 的 UA，
  * 这一段让 system 的第一块与其一致。
+ *
+ * **不许在这句话里添加任何自我说明。** 原文曾经以
+ * "…, running within the DeepSeek Harness account bridge." 结尾，那等于在第一段 system 里
+ * 主动告诉上游「这不是 Claude Code，是一个第三方桥」。magpie 的记录里，
+ * Anthropic 正是把「另一个 agent 的系统提示」判成第三方流量的；AstrLink 的 AGENTS 铁律
+ * 也要求不许把自家品牌注入上游。身份要么整套装成客户端，要么一个字段都别装。
  */
-const CLAUDE_CODE_IDENTITY =
-  "You are Claude Code, Anthropic's official CLI for Claude, running within the DeepSeek Harness account bridge."
+const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
 /** 把工具参数解析成对象；解不开就当空对象（Anthropic 只接受对象）。 */
 function parseToolInput(raw) {

@@ -273,13 +273,23 @@ export class AccountBridgeAdapter {
     return { entry: chosen, stickyKey, reason: pinned ? 'sticky-miss' : 'fresh' }
   }
 
-  /** 会话亲和键：用会话里**第一条 user 消息的 id**（历史被重放，id 跨轮稳定）。 */
-  #stickyKey(family, model, options) {
+  /**
+   * 会话标识（**与模型无关**）：用会话里第一条 user 消息的 id。
+   *
+   * 与 `#stickyKey` 的区别只在「带不带模型」：粘性要按模型分（同一个会话问两个模型是两次
+   * 独立的选择），而发给上游的会话标识不该带模型，否则换个模型就等于换了个会话。
+   */
+  #conversationId(options) {
     const messages = options.messages ?? []
     const first = messages.find((message) => message.role === 'user') ?? messages[0]
     const id = first?.id
-    if (typeof id !== 'string' || id.length === 0) return undefined
-    return `${family.id}/${model}/${id}`
+    return typeof id === 'string' && id.length > 0 ? id : undefined
+  }
+
+  /** 会话亲和键：用会话里**第一条 user 消息的 id**（历史被重放，id 跨轮稳定）。 */
+  #stickyKey(family, model, options) {
+    const id = this.#conversationId(options)
+    return id === undefined ? undefined : `${family.id}/${model}/${id}`
   }
 
   #rememberSticky(key, accountId, now) {
@@ -326,6 +336,7 @@ export class AccountBridgeAdapter {
     }
 
     const stickyKey = this.#stickyKey(family, model, options)
+    const conversation = this.#conversationId(options)
     const pinned = stickyKey ? this.#sticky.get(stickyKey) : undefined
     const ordered = []
     const seen = new Set()
@@ -354,6 +365,10 @@ export class AccountBridgeAdapter {
         const iterator = family
           .stream(this.#ctx, {
             payload,
+            // 族的身份头需要知道「是哪个账号在发」——按账号分命名空间靠它。
+            account: { id: accountId, label: candidate.account.label },
+            // 裸的调用方会话 id（**由族负责按账号派生后再发出去**，不许原样透传）。
+            session: conversation,
             model,
             messages: options.messages,
             tools: options.tools,

@@ -370,6 +370,7 @@ src/
     copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
     trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
+    identity.js       上游身份：成套的头 + 按账号分的会话命名空间（见下面「会话身份」）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
     claude.js         Claude 族
@@ -387,6 +388,7 @@ test/
   mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
   responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
   commands.test.js    `/pool` 命令族（含一个照抄宿主校验规则的假 `commands` 服务）
+  identity.test.js    会话身份：同账号幂等、跨账号不同、裸会话 id 不许出现在请求里
   notices.test.js     许可与署名台账的双向自检（借了没登记 / 登记了文件不存在，都会红）
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
 docs/
@@ -396,6 +398,29 @@ docs/
 > `docs/family-contract.md` 是本仓最该先读的一份文档：族的对象形状、`stream` 的 chunk 契约、
 > 失败归类表、凭据记录与写回 CAS、登录与发现的入口、测试与真机验收清单、提交前自检，都在里面。
 > 本仓所有族的写法都按它来，新增族也应当如此。
+
+## 会话身份：为什么发出去的 id 不是调用方的 id
+
+上游看到的会话标识**必须按账号派生**，不能是调用方那个裸 id。三种做法，两种是错的：
+
+| 做法 | 上游看到什么 | 后果 |
+|---|---|---|
+| 发裸会话 id | 「同一段对话从两个安装打过来」 | 一次换号就把两个账号连起来——正是风控要找的形状 |
+| 每轮换一个 id | 每次都像新对话 | prompt cache 全废，每轮付全量输入的钱 |
+| **按账号派生**（本仓） | 同账号同会话稳定、跨账号不同 | 缓存还在，且不连坐 |
+
+派生在 `src/wire/identity.js`：`sha256(族 + 账号 id + 会话)` 取前 16 字节并置成 **UUIDv4 形状**
+（上游对这个字段有形状校验，随便一串 hex 会被当成畸形值）。
+
+`claude` 族把**同一个值**发在三处——`x-claude-code-session-id` 头、`metadata.user_id`（新 JSON 形态）、
+以及（`codex` / `grok`）`prompt_cache_key`；三处必须一致，否则「成套」就破了。
+拿不到账号或会话时**一个都不发**，也不会退回去发裸 id。
+`test/identity.test.js` 里有断言直接扫整个请求，**裸会话 id 出现即失败**。
+
+> 另外，`CLAUDE_CODE_IDENTITY` 里原本有一句
+> "…running within the DeepSeek Harness account bridge."——那等于在第一段 system 里主动
+> 告诉上游「这不是 Claude Code，是一个第三方桥」。已改为与官方客户端逐字一致的措辞，
+> 并有测试钉住「system 里不许出现 bridge / harness」。
 
 ## 四条真机/源码才暴露的契约（已钉成回归测试）
 
@@ -433,7 +458,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**705 个用例，692 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**728 个用例，715 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
