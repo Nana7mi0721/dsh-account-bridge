@@ -18,6 +18,7 @@
  * @module dsh-account-bridge/api
  */
 
+import { AFFINITY_MODES } from './affinity.js'
 import { discoverLocalAccounts, importDiscovered } from './discover.js'
 
 /** 路由前缀（宿主侧，带前导斜杠）。客户端用不带斜杠的 `account-bridge/...`。 */
@@ -28,6 +29,9 @@ const MAX_BODY_BYTES = 1 << 20
 
 /** 一次 `check` 里单个账号的额度查询超时；上游挂掉时面板不能跟着挂。 */
 const QUOTA_TIMEOUT_MS = 15_000
+
+/** `state` 里回多少条「为什么粘/不粘」。它只是现场快照，不是日志。 */
+const AFFINITY_WHY_SHOWN = 50
 
 /** 回环地址的三种写法（IPv4 / IPv6 / IPv4-mapped）。 */
 const LOOPBACK = new Set(['127.0.0.1', '::1', '::ffff:127.0.0.1'])
@@ -232,11 +236,50 @@ export function registerAccountBridgeRoutes(options) {
     return out
   }
 
+  /**
+   * 会话亲和的状态（W7）。`why` 只给最近几十条——它是给人看的诊断，不是历史记录。
+   */
+  function affinityState() {
+    const book = adapter.affinityBook?.()
+    const why = (adapter.lastWhy?.() ?? []).slice(-AFFINITY_WHY_SHOWN)
+    return {
+      mode: adapter.affinityMode,
+      modes: AFFINITY_MODES,
+      /** 落盘是否可用。`false` = 记录只在内存里，重启即失忆（其余功能不受影响）。 */
+      persisted: book?.persisted === true,
+      remembered: book?.size ?? 0,
+      why: why.reverse().map((row) => ({ model: row.model, why: row.why, accountId: row.accountId, at: row.at })),
+    }
+  }
+
   /** 动作表。每个动作拿 `(body)` 返回一个普通值；抛错 → 信封里带 code。 */
   const actions = {
     /** 只读快照，不查额度（额度要打上游，面板打开时不该等它）。 */
     async state() {
-      return { families: await snapshot() }
+      return { families: await snapshot(), affinity: affinityState() }
+    },
+
+    /**
+     * 会话亲和的四态开关（W7），以及「这段会话为什么粘/不粘」的现场。
+     *
+     * **改的只是这一次运行**：持久值在 `cordis.patch.yml` 的 `config.affinity` 里，
+     * 面板重启就回到配置那个值。这样「临时把粘性关掉看会不会好」不需要改配置重启。
+     */
+    async sticky(body) {
+      if (body.mode !== undefined) {
+        if (!AFFINITY_MODES.includes(body.mode)) {
+          throw Object.assign(new Error(`mode must be one of ${AFFINITY_MODES.join(', ')}`), { code: 'BAD_REQUEST' })
+        }
+        adapter.affinityMode = body.mode
+        log?.info?.('account-bridge: 会话亲和模式 → %s', body.mode)
+      }
+      if (body.clear === true) {
+        if (body.family !== undefined && !familyById.has(body.family)) {
+          throw Object.assign(new Error(`unknown family "${String(body.family)}"`), { code: 'BAD_REQUEST' })
+        }
+        adapter.clearSticky?.(body.family)
+      }
+      return affinityState()
     },
 
     /** 快照 + 逐账号查额度。慢，由「检查」按钮显式触发。 */
@@ -272,7 +315,8 @@ export function registerAccountBridgeRoutes(options) {
       await store.remove(account.id)
       adapter.invalidate(family.id)
       adapter.invalidateHealth()
-      adapter.clearSticky?.(family.id)
+      // 只忘掉指向**这个**账号的记录：账号 id 会回收，留着重登会继承别人的粘性。
+      adapter.forgetAccount?.(account.id)
       log?.info?.('account-bridge: removed %s', account.id)
       return { removed: account.id }
     },
@@ -284,7 +328,9 @@ export function registerAccountBridgeRoutes(options) {
       await amend(account, (current) => ({ ...current, disabled }))
       adapter.invalidate(family.id)
       adapter.invalidateHealth()
-      if (!disabled) adapter.clearSticky?.(family.id)
+      // 这里**刻意不清粘性**：候选人变了不需要清——记录指向的账号要是停用了，`decide()`
+      // 自己会给 `gone`；而清一下会把这一族所有会话的缓存亲和一起抹掉（曾经就是这样，
+      // 结果每启用一个账号就把全部会话的上游缓存白烧一遍）。
       return { account: account.id, disabled }
     },
 

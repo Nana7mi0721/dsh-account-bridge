@@ -17,6 +17,7 @@
  */
 
 import { createFetcher } from './http.js'
+import { AffinityBook, openAffinityTable } from './affinity.js'
 import { CooldownTable } from './health.js'
 import { LoginBroker } from './login/broker.js'
 import { AccountBridgeAdapter } from './pool.js'
@@ -63,6 +64,22 @@ const DEFAULTS = {
   holdLongestMs: undefined,
   holdThinkingMs: undefined,
   holdMostBytes: undefined,
+  /**
+   * 会话亲和（W7）：一段会话粘在「上次答它的那个账号」上，为的是让上游的 prompt cache
+   * 被读回来而不是全额重算。四态：
+   *
+   * - `auto`（默认）：轮内总是粘；跨轮看**实测**——上次上游说它从缓存里读了多少 token
+   *   （不到 1024 就不值得留），以及有没有凉掉（超过 5 分钟）。
+   * - `session`：整段会话都粘。
+   * - `turn`：只在轮内粘（agent 在回传工具结果时），用户一开口就重新选号。
+   * - `off`：不粘，永远按 `src/select.js` 的排序走。
+   *
+   * 记录落在 `ctx.storageDomain`（`~/.dsh/storages/account_bridge.json`），**重启不失忆**。
+   * 迁移到别的账号、或想强行摊开负载时才需要调它。
+   */
+  affinity: undefined,
+  /** 落盘攒多久写一次；只影响写入频率，不影响判定。 */
+  affinityDebounceMs: undefined,
 }
 
 /** 取一个可能尚未就绪的服务。 */
@@ -102,12 +119,17 @@ export function apply(ctx, config) {
 
   const store = new AccountStore(() => serviceOf(ctx, 'credentials'), log)
   const health = new CooldownTable()
+  // 会话亲和那本账**先建出来**：`storageDomain` 什么时候就绪不确定，而接表只是往里塞一个
+  // 句柄。在它就绪之前，这本账照样在内存里工作（只是重启会失忆）。
+  const affinity = new AffinityBook({ log, debounceMs: settings.affinityDebounceMs })
   const adapter = new AccountBridgeAdapter({
     ctx: familyContext,
     store,
     health,
     families,
     log,
+    affinity,
+    affinityMode: settings.affinity,
     hold: {
       // 任何一个没配就整组回落默认值——只调一个不等于把另两个清零。
       ...(settings.holdLongestMs === undefined ? {} : { longestMs: settings.holdLongestMs }),
@@ -140,6 +162,30 @@ export function apply(ctx, config) {
       }
     })
   }
+
+  // 1.5) 会话亲和的落盘（W7）。**打不开不是错误**：亲和是一条优化，读不到就当没有。
+  // 走宿主的 `storageDomain`（`~/.dsh/storages/account_bridge.json`）而不是在 `~/.dsh`
+  // 下面另开一个自己的文件，见 `src/affinity.js` 文件头第 3 条。
+  ctx.inject(['storageDomain'], (storageCtx) => {
+    let opened
+    let closing
+    const open = async () => {
+      opened = await openAffinityTable({ facility: storageCtx.storageDomain, log })
+      if (opened) adapter.affinityBook().attach(opened.table)
+      return opened
+    }
+    closing = open().catch((error) => {
+      log.warn?.('account-bridge: 会话亲和落盘不可用（重启后会失忆，其余功能不受影响）: %s', error?.message ?? error)
+      return undefined
+    })
+    storageCtx.effect(() => () => {
+      // 收尾顺序：**先落盘再关 domain**（关掉之后 `put` 会被拒绝）。
+      void Promise.resolve(closing)
+        .then(() => adapter.affinityBook().close())
+        .then(() => opened?.close?.())
+        .catch(() => {})
+    })
+  })
 
   // 2) 登录：每族一个 flow。key 就是登录槽位的凭据键，seam 会往那里写。
   ctx.inject(['authorization'], (authCtx) => {

@@ -62,7 +62,10 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | MiniMax Code 令牌刷新 + **写回桌面端**（generation CAS，防两边互相踩） | ✅ 真机验证（对真实文件跑通，令牌每刷必换是实测事实） |
 | Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 单测 |
 | 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ✅ 单测 |
-| 账号池调度：会话粘性 + 首个实质输出前才允许换号 + 冷却表 | ✅ 单测 |
+| 账号池调度：首发实质输出前才允许换号 + 冷却表 + 退避 | ✅ 真机验证 |
+| 选号排序（额度档位 / 节奏 / 被限流过的沉底） | ✅ 真机验证（fake 上游上看得到谁先上） |
+| 会话亲和：按上游自报的缓存读取量决定粘不粘，四态可切 | ✅ 真机验证（关掉粘性排序就会抢走） |
+| 亲和记录落盘 `$DSH_HOME/storages/account_bridge.json`，重启不失忆 | ✅ 真机验证（换一个宿主进程仍认原来的账号） |
 | 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 单测通过，**真机未验**（本机没装 Qoder、没有 PAT） |
 | 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 单测通过，**真机仅验到第一条**（本机凭据是 5.6 的密文） |
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 单测通过，**真机未验**（本机没有 CommandCode 账号） |
@@ -113,21 +116,46 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 /pool                        看每族的账号与健康（**不发任何网络请求**）
 /pool check [族]             真去查一次额度（**会打上游**）
 /pool unfreeze [族] [账号]   清掉冷却，让号立刻重新参与调度（`thaw` 同义）
+/pool sticky [模式]          看/切会话粘性：auto（默认）| session | turn | off
+/pool sticky forget [族]     **忘掉**记着的会话亲和（不写族名就是全部）
 ```
 
-三条设计约束：
+**`/pool sticky` 会解释每一次换号。** 它把最近 12 条裁决翻成人话印出来，例如
+「上游缓存还在，继续用它」／「上次它只从缓存里读了不到 1024 token，不值得为它换号」／
+「上次答复到现在超过 5 分钟，缓存凉了」。少了这段，用户看到的只是「它不粘了」，
+而不知道该去调哪个开关。
+
+四条设计约束：
 
 1. **`/pool` 不发网络请求。** 它只读凭据记录与内存里的冷却表。想在对话里顺手看一眼池子
    是常事，而每一次自动查额度都是拿你的账号去碰上游的风控。
 2. **`/pool check` 会把「这一族没有额度接口」和「有接口但这次没读出来」分开写。**
    两者都是「未知」，但含义不同：前者你永远等不到读数，后者值得再试一次。
-3. **解冻那条命令会解释它为什么安全。** 冷却表是纯内存的派生状态，清掉最坏结果是
+3. **「忘掉」不会顺手发生。** 账号停用或删除时**只**丢掉指向那个账号的记录
+   （账号 id 会回收，不清就会让下次登录继承上一段会话的粘性）；要把一整族忘干净，
+   必须由人明说（`/pool sticky forget` 或面板上的「忘掉」）。
+4. **解冻那条命令会解释它为什么安全。** 冷却表是纯内存的派生状态，清掉最坏结果是
    下次再撞一次同样的失败、再记一条。不说清楚，人不敢用，账号就一直冻着——那才是真损失。
 
 `/pool unfreeze codex-1` 会被认出来（`codex-1` 看起来是账号 id，不是族），并直接告诉你正确写法
 是 `/pool unfreeze codex codex-1`。
 
 命令面走宿主自己的 `ctx.commands.register()`，**不产生模型消息、不进模型历史**，所以问一句不烧额度。
+
+## 配置项（`cordis.patch.yml` 里那一行的 `config:`）
+
+| 键 | 默认 | 说明 |
+|---|---|---|
+| `families` | 全部 | 只启用列出的族 |
+| `affinity` | `auto` | 会话粘性四态，见「设计要点」 |
+| `affinityDebounceMs` | `2000` | 亲和记录攒多久落一次盘；只影响写入频率 |
+| `holdLongestMs` / `holdThinkingMs` / `holdMostBytes` | 见 `src/pool.js` | 换号窗口的三个上限。上游特别慢（首字节要等 20 秒以上）时把 `holdLongestMs` 调长 |
+| `discoverOnStartup` | `true` | 启动时后台扫一遍本机客户端登录态（只打日志，不导入任何东西）。关掉它的理由是 `agy` 族的探测要起一次子进程 |
+| `claudeClientVersion` / `codexClientVersion` | 自动 | 冒充的上游 CLI 版本；留空则查 npm 最新，查不到用兜底常量并如实标注 |
+| `agyBin` / `agyWorkdir` | PATH / 进程 cwd | agy 族的 CLI 位置与工作目录 |
+
+改完不用重启整个 DSH：`/pool sticky` 与面板上的开关改的是**这一次运行**，
+持久值仍然在这个文件里。
 
 ## 设置 → 模型页上的两处摘要
 
@@ -354,6 +382,8 @@ src/
   cli-version.js      上游客户端版本号（查 npm registry，失败静默回退）
   cli-run.js          驱动上游 CLI 的子进程层（进程树 kill / 超时 / 撕裂行拼接）
   discover.js         本机登录态统一发现与一键导入（每族独立超时 + 身份指纹）
+  select.js           选哪个账号先上（档位 / 额度节奏 / 沉底；纯函数，来自 magpie）
+  affinity.js         会话亲和：按上游自报的缓存读取量决定粘不粘 + 落进 storageDomain
   login/
     loopback.js       PKCE + 回环回调服务器
     broker.js         「拿到 URL」与「登录完成」解耦
@@ -388,6 +418,10 @@ test/
   mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
   responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
   commands.test.js    `/pool` 命令族（含一个照抄宿主校验规则的假 `commands` 服务）
+  select.test.js      排序判据（含「重置时刻截断到小时」「pace 必须离散成层」两条）
+  select-wiring.test.js    池子有没有把额度喂进去、有没有按裁决换号
+  affinity.test.js    四态、粘性键、落盘与重建、遗忘的粒度
+  affinity-wiring.test.js  粘性与排序真的会给出不同答案的那些场景
   identity.test.js    会话身份：同账号幂等、跨账号不同、裸会话 id 不许出现在请求里
   notices.test.js     许可与署名台账的双向自检（借了没登记 / 登记了文件不存在，都会红）
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
@@ -472,7 +506,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**871 个用例，858 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**927 个用例，914 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
@@ -545,9 +579,42 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   TTL、失败后隔 1 分钟才再试，**装配与选择都不为它等待**。上游返回 `undefined`（什么都没说）
   时**不写快照**——保持「未知」才能继续走 `learns`；写成 0 就等于替上游宣布「你没额度了」。
   `test/select-wiring.test.js` 里有一条用例让额度查询永不落地，并断言请求照样跑完。
-- **会话粘性**：同一会话尽量用同一个账号，保住上游的 prompt cache；粘性键取会话里
-  第一条 user 消息的 id（历史会被重放，所以这个键跨轮稳定）。**粘性优先于上面那套轮换**，
-  否则同一段会话每轮换一个账号，上游缓存全废——那比「选错账号」贵得多。
+- **会话粘性：粘不粘由上游「到底从缓存里读了多少」说了算**（`src/affinity.js`，语义借自 magpie
+  的 `internal/gateway/affinity.go`，见 `THIRD_PARTY_NOTICES.md`）。旧写法是「同一段会话无条件
+  粘住」，它有个说不出口的假定：**粘住就一定省了钱**。上游若压根没缓存这一轮（换了模型、
+  缓存过期、服务端把它踢了），粘住只是在把一个可能已经被限流的账号钉死在会话上。
+  现在的四态（`config.affinity`）：
+
+  | 模式 | 行为 |
+  |---|---|
+  | `auto`（默认） | 上一轮**从缓存里读了 ≥1024 token** 且 **答复至今不到 5 分钟** ⇒ 粘住；否则交给排序 |
+  | `session` | 整段会话都粘同一个账号（旧的「无条件粘」） |
+  | `turn` | 只在**同一轮**内粘（比如一轮里回传工具结果、再问一次） |
+  | `off` | 不粘 |
+
+  判据是 `usage` 里上游自报的缓存读取量（`cachedInputTokens` / `cache_read_input_tokens` /
+  `cached_tokens`），**不是猜的**。粘性键是 `${族}-${sha256(模型 + 换行 + 会话 id) 前 24 位}`——
+  键里带模型，因为同一段会话换模型就是另一份缓存（这一步刻意偏离 magpie）。
+  **粘性只在它确实该赢的时候才推翻排序**：记录指向的账号正在冷却、或者额度已经用满 98%、
+  或者已经不在候选里（被删/被停用），粘性都会让位，并把理由记下来。
+  每次裁决都会留一个 `why`（`sticky-hit` / `sticky-new` / `cache-weak` / `cache-cold` /
+  `resting` / `spent` / `gone` / `session` / `turn` / `sticky-miss` / `off`），
+  `/pool sticky` 与面板会把它翻成人话——**「为什么这次换了账号」必须答得出来**，
+  否则用户只能看到它「不粘」。
+- **亲和记录落在 `ctx.storageDomain`，重启不失忆**：domain 名 `account_bridge`、表 `affinity`，
+  由宿主的 `storage-json` 后端写成 `$DSH_HOME/storages/account_bridge.json`。
+  不自己开文件，是因为这一份数据本来就该和宿主的存储一起被备份、被清理。
+  攒 2 秒再落盘（那个后端是「整个 unit 一个 JSON 文件」，写一条就要重写一遍）；
+  **写不进去时记录留在脏表里等下次，绝不假装写成功了**；读不懂的记录按「读不懂」处理
+  （`invalidRecords: 'backup-and-skip'`）——当成「这段会话没有记录」会在下一次落盘时把它永久抹掉。
+  收尾顺序是**先落盘再关 domain**。
+- **删账号要忘掉指向它的记录，停用账号什么都不要动**。这一条是拿真机换来的：原先 `remove` 与
+  「启用一个账号」都是 `clearSticky(族)`，于是探针 `finally` 里重新启用 59 个账号时，
+  这一族**所有**会话的缓存亲和被清了 59 遍——现象是「`persisted` 报 true，盘上一条记录都没有」。
+  现在 `remove` 只丢掉 `accountId` 指向那一个账号的记录（**账号 id 会回收**，`nextAccountId()`
+  取最小空号，不清就会让下次登录继承上一段会话的粘性），`toggle` 一个字都不动——
+  候选人变了不需要清，`decide()` 自己会给 `gone`。**整族清只留给用户明说要忘的那条路**
+  （`/pool sticky forget` 与面板上的「忘掉」）。
 - **刷新按账号合并 in-flight promise**：refresh token 通常一次性轮换，并发刷新会把账号踢下线。
   DSH 凭据记录的独占写只解决跨进程，解决不了同进程并发。
 - **刷新失败同样记冷却，冷却期间不再重试刷新**。模型目录是靠刷新后的 payload 去拉的，

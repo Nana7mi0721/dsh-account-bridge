@@ -249,6 +249,71 @@ test('remove deletes exactly one account and reports 404 for strangers', async (
   }
 })
 
+test('removing an account forgets only that account; enabling one forgets nothing', async () => {
+  // 这一条钉的是「别顺手把一整族的缓存亲和抹掉」。账号 id 是**会回收**的
+  // （`nextAccountId()` 取最小空号），所以删号时得忘掉指向它的记录，否则下次登录拿到
+  // 同一个 id 会继承上一段会话的粘性；但启用账号只是多了一个候选人——`decide()` 自己
+  // 就会给 `gone`，没必要清。曾经这里两种情形都是 `clearSticky(族)`：每启用一个账号，
+  // 这一族**所有**会话的上游缓存就被白烧一遍（真机跑出来的现象：盘上的记录全没了）。
+  const seen = []
+  const accounts = new Map([
+    ['codex-1', { id: 'codex-1', family: 'codex', label: 'one', auth: {} }],
+    ['codex-2', { id: 'codex-2', family: 'codex', label: 'two', auth: {} }],
+  ])
+  const routes = []
+  const dispose = registerAccountBridgeRoutes({
+    webServer: {
+      register(route) {
+        routes.push(route)
+        return () => {}
+      },
+    },
+    adapter: {
+      invalidate: () => seen.push('invalidate'),
+      invalidateHealth: () => seen.push('invalidateHealth'),
+      clearSticky: (family) => seen.push(`clearSticky:${family}`),
+      forgetAccount: (id) => seen.push(`forgetAccount:${id}`),
+    },
+    store: {
+      list: async (family) => [...accounts.values()].filter((account) => account.family === family),
+      remove: async (id) => {
+        accounts.delete(id)
+      },
+      update: async (id, mutate) => {
+        const next = accounts.has(id) ? mutate(accounts.get(id)) : undefined
+        if (next !== undefined) accounts.set(id, next)
+        return next
+      },
+    },
+    families: [{ id: 'codex', displayName: 'Codex', route: 'acct-codex', login: { methods: [{ id: 'import' }] }, discover: () => [] }],
+    ctx: {},
+    log: {},
+  })
+  try {
+    const handler = routes[0].handler
+    const post = async (action, body) => {
+      const res = fakeResponse()
+      await handler(fakeRequest({ url: `${PREFIX}/${action}`, body }), res)
+      return res.captured
+    }
+
+    seen.length = 0
+    const removed = await post('remove', { account: 'codex-2' })
+    assert.equal(removed.status, 200)
+    assert.ok(seen.includes('forgetAccount:codex-2'), `remove 要忘掉那个账号，实际: ${seen.join(',')}`)
+    assert.ok(!seen.includes('clearSticky:codex'), 'remove 不该把一整族清掉')
+
+    seen.length = 0
+    const on = await post('toggle', { account: 'codex-1', disabled: false })
+    assert.equal(on.status, 200)
+    assert.ok(seen.includes('invalidate'), 'toggle 仍要作废目录缓存')
+    assert.ok(!seen.some((call) => call.startsWith('clearSticky')), `toggle 不该动粘性，实际: ${seen.join(',')}`)
+    assert.ok(!seen.some((call) => call.startsWith('forgetAccount')), 'toggle 也不该忘掉账号记录')
+  } finally {
+    dispose()
+  }
+})
+
 test('login without an authorization service says so instead of typing on undefined', async () => {
   // 这个 harness 会注册 authorization，所以这里直接测 api.js 的空实现路径。
   const calls = []

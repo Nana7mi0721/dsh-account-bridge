@@ -19,6 +19,7 @@
  *    于是账号会一直冻着——那才是真正的损失。
  */
 
+import { AFFINITY_MODES } from './affinity.js'
 import { quotaOf } from './api.js'
 
 /** 命令名要走宿主的 COMMAND_NAME 正则：小写字母/数字/`_`/`-`。 */
@@ -28,7 +29,24 @@ export const USAGE = [
   '`/pool` 或 `/pool status` —— 列出每族的账号与健康（不发网络请求）',
   '`/pool check [族]` —— 真去查一次额度（会打上游）',
   '`/pool unfreeze [族] [账号]` —— 清掉冷却，让号立刻重新参与调度',
+  '`/pool sticky [auto|session|turn|off]` —— 看/改会话粘性，以及「这段会话为什么粘它」',
+  '`/pool sticky forget [族]` —— 丢掉粘性记录（下次重新选号）',
 ].join('\n')
+
+/** 「为什么粘它/不粘」那 11 个裁决说成人话。 */
+export const WHY_TEXT = {
+  off: '粘性关着',
+  'sticky-new': '这段会话还没有人答过',
+  gone: '上次答它的那个账号已经不在了',
+  resting: '上次答它的那个账号在冷却里',
+  spent: '上次答它的那个账号快用满了',
+  session: '整段会话都粘（session）',
+  turn: '这一轮还在进行中（在回传工具结果）',
+  'sticky-miss': '新的一轮开始了（turn 模式）',
+  'cache-weak': '上次它只从缓存里读了不到 1024 token，不值得为它换号',
+  'cache-cold': '上次答复到现在超过 5 分钟，缓存凉了',
+  'sticky-hit': '上游缓存还在，继续用它',
+}
 
 /** `remainingFraction` → `62%`；不是有限数就返回 undefined，绝不把未知写成 0%。 */
 export function percentText(fraction) {
@@ -209,6 +227,61 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
     }
   }
 
+  /**
+   * 会话粘性（W7）：看四态、看「为什么」、改四态、丢掉记录。
+   *
+   * 只读那一条不发网络请求；改模式只影响**这一次运行**（持久值在 `cordis.patch.yml`），
+   * 这一点必须在输出里说清楚，否则人会以为改完就记住了。
+   */
+  async function stickyText(token, familyToken) {
+    if (token === 'forget' || token === 'clear') {
+      const family = familyToken ? findFamily(families, familyToken) : undefined
+      if (familyToken && !family) {
+        return { kind: 'error', text: `没有叫 \`${familyToken}\` 的族。可用：${families.map((item) => item.id).join(' / ')}` }
+      }
+      adapter.clearSticky?.(family?.id)
+      return {
+        kind: 'success',
+        text: family
+          ? `丢掉了 \`${family.id}\` 的粘性记录。下一轮由选号重新决定用谁——那也意味着上游的 prompt cache 会重算一次。`
+          : '丢掉了全部粘性记录。下一轮由选号重新决定用谁——那也意味着上游的 prompt cache 会重算一次。',
+      }
+    }
+    if (token !== undefined && token !== '') {
+      if (!AFFINITY_MODES.includes(token)) {
+        return { kind: 'error', text: `粘性只能是 ${AFFINITY_MODES.join(' / ')} 之一，收到 \`${token}\`。` }
+      }
+      adapter.affinityMode = token
+    }
+    const book = adapter.affinityBook?.()
+    const rows = adapter.lastWhy?.() ?? []
+    const lines = [
+      `### 会话粘性：\`${adapter.affinityMode}\``,
+      '',
+      `- 可选：${AFFINITY_MODES.map((mode) => `\`${mode}\``).join(' / ')}（\`auto\` 是默认）`,
+      `- 落盘：${book?.persisted === true ? '✅ 已接上（重启不失忆）' : '⚠️ 只在内存里（重启即失忆，其余功能不受影响）'}`,
+      `- 记着的会话：${book?.size ?? 0} 段`,
+      '',
+      '| 模式 | 含义 |',
+      '|---|---|',
+      '| `auto` | 轮内总是粘；跨轮看**实测**——上次上游说它从缓存读了多少 token（不到 1024 不值得留），以及有没有凉掉（超过 5 分钟） |',
+      '| `session` | 整段会话都粘，不管缓存读了多少 |',
+      '| `turn` | 只在轮内粘（agent 在回传工具结果时），用户一开口就重新选号 |',
+      '| `off` | 不粘，永远按额度与节奏排序 |',
+    ]
+    if (rows.length > 0) {
+      lines.push('')
+      lines.push('最近几次选择（新的在前）：')
+      for (const row of rows.slice(-12).reverse()) {
+        const said = WHY_TEXT[row.why] ?? row.why
+        lines.push(`- \`${row.family}/${row.model}\` → \`${row.accountId ?? '—'}\`：${said}`)
+      }
+    }
+    lines.push('')
+    lines.push('改模式只影响**这一次运行**；要持久就写进 `cordis.patch.yml` 的 `config.affinity`。')
+    return { kind: 'success', text: lines.join('\n') }
+  }
+
   async function handler({ rawInput }) {
     const [verb, ...rest] = splitInput(rawInput)
     try {
@@ -221,6 +294,9 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
         case 'unfreeze':
         case 'thaw':
           return await unfreezeText(rest[0], rest[1])
+        case 'sticky':
+        case 'affinity':
+          return await stickyText(rest[0], rest[1])
         default:
           return { kind: 'error', text: `不认识的子命令 \`${verb}\`。\n\n${USAGE}` }
       }
@@ -232,8 +308,8 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
 
   return {
     name: COMMAND_NAME,
-    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号',
-    input: { hint: '[status|check|unfreeze] [族] [账号]' },
+    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号、看会话粘性',
+    input: { hint: '[status|check|unfreeze|sticky] [族] [账号]' },
     handler,
   }
 }

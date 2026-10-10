@@ -8,7 +8,8 @@
  *    **但「思考」也不算输出**，且缓冲不能无限等下去——三个上限见 `HOLD_LONGEST_MS`
  *    那一组的注释。
  * 2. **粘性会话是刚需**：同一个会话尽量钉在同一个账号上，否则上游的 prompt cache
- *    每轮都失效。TTL + 上限，auth 变更时清空。
+ *    每轮都失效、每轮都从头全额计费。判据是**实测**的（上游说它从缓存里读了多少），
+ *    四态与判定顺序见 `src/affinity.js`；记录会落到 `ctx.storageDomain`，重启不失忆。
  * 3. **选择器是各账号目录的并集**：多个账号都有的模型可以互相 failover，
  *    只有一个账号有的模型就钉死在那个账号上。
  * @module dsh-account-bridge/pool
@@ -16,7 +17,15 @@
 
 import { accountKey, classifyFailure, memberKey } from './health.js'
 import { carryFailure, carryingFailures } from './failure.js'
-import { decayUsage, rankCandidates, usageNow } from './select.js'
+import {
+  AffinityBook,
+  cachedRead,
+  decide,
+  normaliseMode,
+  recordKey,
+  turnOf,
+} from './affinity.js'
+import { SPENT_SHARE, decayUsage, rankCandidates, shareOf, usageNow } from './select.js'
 import { redact } from './util.js'
 
 /** 池装配的缓存时长：`owns()` 每次选模型都会跑，而装配要碰目录与账号存储。 */
@@ -30,9 +39,8 @@ const CATALOG_TTL_MS = 10 * 60_000
 const ALLOWANCE_TTL_MS = 5 * 60_000
 /** 额度查询失败后的重试间隔。比成功长，免得把一个坏掉的额度端点打成重试风暴。 */
 const ALLOWANCE_RETRY_MS = 60_000
-/** 粘性会话表的上限与 TTL。 */
-const STICKY_LIMIT = 1000
-const STICKY_TTL_MS = 30 * 60_000
+/** `#lastWhy` 的上限（只是给人看的诊断，不是状态）。 */
+const WHY_LIMIT = 1000
 
 /*
  * 换号窗口的三个上限（语义照 magpie `internal/gateway/fallback.go` 的
@@ -118,7 +126,14 @@ export class AccountBridgeAdapter {
   #log
   #catalogs = new Map()
   #pools = new Map()
-  #sticky = new Map()
+  /**
+   * 会话亲和（粘谁、为什么）。**没接上 `ctx.storageDomain` 也能用**，只是重启失忆。
+   * 记录本身带上游实测的缓存读取量，见 `src/affinity.js`。
+   */
+  #affinity
+  #affinityMode
+  /** 最近一次选择给出的理由（`/pool` 与调试用）。`<族>/<模型>/<会话>` → 裁决。 */
+  #lastWhy = new Map()
   #inflightRefresh = new Map()
   /**
    * 额度快照：`<族>/<账号>` → `{ at, windows }`。
@@ -137,13 +152,40 @@ export class AccountBridgeAdapter {
   #sunkSeq = 0
   #hold
 
-  constructor({ ctx, store, health, families, log, hold }) {
+  constructor({ ctx, store, health, families, log, hold, affinity, affinityMode }) {
     this.#ctx = ctx
     this.#store = store
     this.#health = health
     this.#families = families
     this.#log = log
     this.#hold = { ...HOLD_DEFAULTS, ...(hold ?? {}) }
+    this.#affinity = affinity ?? new AffinityBook({ log })
+    this.#affinityMode = normaliseMode(affinityMode)
+  }
+
+  /** 会话亲和那本账（`index.js` 在 `storageDomain` 就绪后把表接上去）。 */
+  affinityBook() {
+    return this.#affinity
+  }
+
+  /** 当前的粘性模式（四态之一）。 */
+  get affinityMode() {
+    return this.#affinityMode
+  }
+
+  set affinityMode(value) {
+    this.#affinityMode = normaliseMode(value)
+  }
+
+  /**
+   * 最近一次选择给出的理由；`familyId` 省略时给全部。
+   *
+   * 键就是 `recordKey()` 造出来的 `${familyId}-<摘要>`，所以前缀分隔符是**连字符**。
+   */
+  lastWhy(familyId) {
+    return [...this.#lastWhy.entries()]
+      .filter(([key]) => familyId === undefined || key.startsWith(`${familyId}-`))
+      .map(([key, value]) => ({ key, ...value }))
   }
 
   /** 本适配器占用的 provider route 列表。 */
@@ -453,20 +495,26 @@ export class AccountBridgeAdapter {
     return typeof id === 'string' && id.length > 0 ? id : undefined
   }
 
-  /** 会话亲和键：用会话里**第一条 user 消息的 id**（历史被重放，id 跨轮稳定）。 */
-  #stickyKey(family, model, options) {
-    const id = this.#conversationId(options)
-    return id === undefined ? undefined : `${family.id}/${model}/${id}`
+  /** `#lastWhy` 只留最近 `WHY_LIMIT` 条（Map 保持插入顺序，先来的先丢）。 */
+  #trimWhy() {
+    if (this.#lastWhy.size <= WHY_LIMIT) return
+    for (const key of this.#lastWhy.keys()) {
+      if (this.#lastWhy.size <= WHY_LIMIT) break
+      this.#lastWhy.delete(key)
+    }
   }
 
-  #rememberSticky(key, accountId, now) {
-    this.#sticky.set(key, accountId)
-    if (this.#sticky.size <= STICKY_LIMIT) return
-    for (const [existing, value] of this.#sticky) {
-      if (this.#sticky.size <= STICKY_LIMIT) break
-      this.#sticky.delete(existing)
-    }
-    void now
+  /**
+   * 会话亲和键：用会话里**第一条 user 消息的 id**（历史被重放，id 跨轮稳定）**加模型**。
+   *
+   * 加模型是**刻意偏离 magpie**（它是 `scope|conversation`，模型记在记录里）：
+   * 我们的候选集本来就按模型过滤过，magpie 那三级谓词在我们这里退化成「账号相同」，
+   * 带不带模型只影响查的是哪一条记录。带上的理由是一段会话里换个模型问一句时，
+   * 不带模型就会把上一条覆盖掉，于是两个模型轮流把对方挤走、谁都粘不住。
+   */
+  #stickyKey(family, model, options) {
+    const id = this.#conversationId(options)
+    return id === undefined ? undefined : recordKey(family.id, model, id)
   }
 
   /**
@@ -543,32 +591,60 @@ export class AccountBridgeAdapter {
 
     const stickyKey = this.#stickyKey(family, model, options)
     const conversation = this.#conversationId(options)
-    const pinned = stickyKey ? this.#sticky.get(stickyKey) : undefined
     const now = Date.now()
-    const ordered = []
-    const seen = new Set()
-    if (pinned) {
-      const hit = candidates.find((candidate) => candidate.account.id === pinned)
-      if (hit) {
-        ordered.push(hit)
-        seen.add(hit.account.id)
-      }
-    }
     // 顺序由 `select.js` 决定：额度分档 → 剩余额度撑多久 → 重置时间 → 近期用量 → id。
     // 额度未知、而这一族又读得出额度的账号，只在还没读到过时排到最前（`learns`）。
-    const ready = candidates.filter(
-      (candidate) =>
-        !seen.has(candidate.account.id) &&
-        this.#health.available(family.id, candidate.account.id, model, now),
+    const ready = candidates.filter((candidate) =>
+      this.#health.available(family.id, candidate.account.id, model, now),
+    )
+    const resting = new Set(
+      candidates
+        .filter((candidate) => !ready.includes(candidate))
+        .map((candidate) => candidate.account.id),
     )
     const ranked = rankCandidates(
       ready.map((entry) => this.#candidateOf(family, entry, now)),
       now,
     )
-    for (const candidate of ranked.order) ordered.push(candidate.entry)
+    const ordered = ranked.order.map((candidate) => candidate.entry)
     // 冷却中的排最后，但**永不剔除**：前面的全都试完了，照样试它一次。
     for (const candidate of candidates) {
       if (!ordered.includes(candidate)) ordered.push(candidate)
+    }
+    // 「几乎用满」的判据与 `select.js` 同源（98%），且**只对一个本来就不在第一个位置上的
+    // 账号生效**——它要是本来就排第一，那就继续用它，直到上游真的拒绝为止。
+    const spent = new Set(
+      ranked.order
+        .filter((candidate) => Number(shareOf(candidate)) >= SPENT_SHARE)
+        .map((candidate) => candidate.account.id),
+    )
+    const { turn, within } = turnOf(options.messages)
+    const record = stickyKey === undefined ? undefined : this.#affinity.get(stickyKey, now)
+    const verdict = decide({
+      mode: this.#affinityMode,
+      record,
+      candidates: ordered.map((candidate) => ({ id: candidate.account.id })),
+      resting,
+      spent,
+      within,
+      now,
+    })
+    if (stickyKey !== undefined) {
+      // 先删再塞，让 Map 的顺序是「最近用到」而不是「第一次见到」。
+      this.#lastWhy.delete(stickyKey)
+      this.#lastWhy.set(stickyKey, {
+        family: family.id,
+        model,
+        why: verdict.why,
+        accountId: verdict.accountId,
+        at: now,
+      })
+      this.#trimWhy()
+    }
+    if (verdict.kept && verdict.at > 0) {
+      // 粘住：把它挪到最前，其余保持选号给的相对顺序。
+      const [kept] = ordered.splice(verdict.at, 1)
+      ordered.unshift(kept)
     }
 
     let lastError
@@ -581,6 +657,13 @@ export class AccountBridgeAdapter {
       let deadlineAt = 0
       let committed = false
       let produced = false
+      /**
+       * 这一轮上游自报「从缓存里读到了多少」——**唯一的实测判据**，决定这段会话下一轮还粘不粘。
+       *
+       * 只认最后一次非零值：usage 可能在流中间就来，收尾再报一次总量；
+       * 而显式的 0 是「这次没读到缓存」，不该把前面那次真实读数擦掉。
+       */
+      let cacheRead = 0
       // 这一轮会不会「想完之后拒绝整轮」：决定「手里只有思考」时给不给它时间。
       const refusesThinking = refusesAfterThinking(family, model)
       /**
@@ -593,7 +676,6 @@ export class AccountBridgeAdapter {
         if (committed) return []
         committed = true
         produced = true
-        if (stickyKey) this.#rememberSticky(stickyKey, accountId, Date.now())
         const buffered = pending.slice()
         pending.length = 0
         pendingBytes = 0
@@ -644,6 +726,10 @@ export class AccountBridgeAdapter {
           // 反复拿到同一个已解决的结果，转成死循环。
           next = iterator.next()
           if (!value) continue
+          if (value.type === 'usage') {
+            const read = cachedRead(value.usage)
+            if (read > 0) cacheRead = read
+          }
           if (committed) {
             yield value
             continue
@@ -682,6 +768,17 @@ export class AccountBridgeAdapter {
         }
         this.#health.clear(family.id, accountId, model)
         this.#noteUsage(family, accountId)
+        if (stickyKey !== undefined) {
+          // 记在**答完**之后：失败的那一轮没资格粘住谁（换号是为了换个能答的）。
+          this.#affinity.remember(stickyKey, {
+            accountId,
+            model,
+            effort: options.effort ?? options.reasoningEffort,
+            turn,
+            at: Date.now(),
+            cacheRead,
+          })
+        }
         return
       } catch (error) {
         lastError = error
@@ -759,10 +856,40 @@ export class AccountBridgeAdapter {
     this.#pools.clear()
   }
 
-  /** 清理粘性表（账号被设成默认时调用）。 */
+  /**
+   * 手动清掉粘性记录（`/pool sticky forget` 与面板上的「忘掉」）。
+   *
+   * 这是**唯一**一条会把记录整族丢掉的路径：别的地方都不需要它。账号被停用、被删掉、
+   * 被换掉时，`decide()` 自己会给出 `gone` / `resting`，记着的那条无害；而顺手清一整族
+   * 会把**别的账号答过的会话**也一起忘掉——那等于白烧它们的上游缓存。
+   *
+   * 清掉不等于换号：下一轮由 `select.js` 重新排序，缓存该丢就丢，理由落在 `#lastWhy` 里。
+   */
   clearSticky(familyId) {
-    for (const key of [...this.#sticky.keys()]) {
-      if (!familyId || key.startsWith(`${familyId}/`)) this.#sticky.delete(key)
+    if (!familyId) {
+      this.#affinity.clear()
+      this.#lastWhy.clear()
+      return
+    }
+    this.#affinity.forgetPrefix(`${familyId}-`)
+    this.#dropWhy((key) => key.startsWith(`${familyId}-`))
+  }
+
+  /**
+   * 一个账号被删掉时调用：只忘掉**指向它**的记录。
+   *
+   * 不整族清的理由见 `src/affinity.js` 的 `forgetAccount()`：账号 id 会回收，所以这条
+   * 记录留着有害；但其它账号答过的会话与这次删除无关，没必要陪着一起失忆。
+   */
+  forgetAccount(accountId) {
+    const dropped = this.#affinity.forgetAccount(accountId)
+    this.#dropWhy((key, row) => row.accountId === accountId)
+    return dropped
+  }
+
+  #dropWhy(match) {
+    for (const [key, row] of [...this.#lastWhy.entries()]) {
+      if (match(key, row)) this.#lastWhy.delete(key)
     }
   }
 
@@ -797,7 +924,8 @@ export class AccountBridgeAdapter {
     return {
       pools: [...this.#pools.keys()],
       catalogs: [...this.#catalogs.keys()],
-      sticky: this.#sticky.size,
+      affinity: { mode: this.#affinityMode, size: this.#affinity.size, persisted: this.#affinity.persisted },
+      why: [...this.#lastWhy.entries()].map(([key, value]) => `${key}=${value.why}@${value.accountId}`),
       allowances: [...this.#allowances.keys()],
       sunk: [...this.#sunk.entries()].map(([key, seq]) => `${key}#${seq}`),
       health: this.#health.snapshot(),
@@ -805,4 +933,4 @@ export class AccountBridgeAdapter {
   }
 }
 
-export { memberKey, accountKey, STICKY_TTL_MS }
+export { memberKey, accountKey }
