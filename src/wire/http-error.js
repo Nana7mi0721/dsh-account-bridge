@@ -24,6 +24,10 @@ export function httpError(response, text, who) {
   const providerRetryAfterMs = retryAfterMs(response.headers)
   error.code = mapStatus(response.status, detail)
   error.failure = {
+    // `message` **不能省**：宿主的 `failureSnapshot()` 要求 message 与 code 都是非空字符串，
+    // 少一个就把整份快照判成 undefined，然后退回 `{message, code:'UNKNOWN'}`。
+    // 也就是说：少了这一行，所有族的失败码在宿主面上都是 `UNKNOWN`（实测踩过）。
+    message: error.message,
     status: response.status,
     code: error.code,
     ...(providerRetryAfterMs === undefined ? {} : { providerRetryAfterMs }),

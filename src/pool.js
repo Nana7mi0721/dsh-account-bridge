@@ -15,6 +15,7 @@
  */
 
 import { accountKey, classifyFailure, memberKey } from './health.js'
+import { carryFailure, carryingFailures } from './failure.js'
 import { redact } from './util.js'
 
 /** 池装配的缓存时长：`owns()` 每次选模型都会跑，而装配要碰目录与账号存储。 */
@@ -162,16 +163,24 @@ export class AccountBridgeAdapter {
    */
   async listModels(provider, signal) {
     const family = this.familyOf(provider)
-    const pool = await this.#pool(family, signal)
-    return pool.models
+    try {
+      const pool = await this.#pool(family, signal)
+      return pool.models
+    } catch (error) {
+      throw carryFailure(error)
+    }
   }
 
   async resolveModel(provider, model, signal) {
     const family = this.familyOf(provider)
-    const resolved = family.resolveModel
-      ? await family.resolveModel(provider, model, signal)
-      : { provider, id: model, name: model }
-    return { ...resolved, provider, id: model }
+    try {
+      const resolved = family.resolveModel
+        ? await family.resolveModel(provider, model, signal)
+        : { provider, id: model, name: model }
+      return { ...resolved, provider, id: model }
+    } catch (error) {
+      throw carryFailure(error)
+    }
   }
 
   /**
@@ -190,7 +199,9 @@ export class AccountBridgeAdapter {
   /** 直接实现 stream，便于 `prepareCall` 之外的调用方（测试）使用。 */
   stream(options) {
     const family = options.family ?? this.familyOf(options.provider)
-    return this.#streamWithPool(family, options)
+    // 包一层 `carryingFailures`：失败可能在消费到一半才发生，只有把 `yield*` 整个包住
+    // 才接得到，接不到就等于让宿主的失败码停在 `UNKNOWN`（见 `src/failure.js`）。
+    return carryingFailures(this.#streamWithPool(family, options))
   }
 
   // -------------------------------------------------------------- 池装配

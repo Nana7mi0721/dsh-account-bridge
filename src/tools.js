@@ -269,6 +269,7 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
       label: { type: 'string', description: 'Display name. Defaults to the preset name or the host.' },
       models: { type: 'string', description: 'Comma-separated model ids to declare, for endpoints whose /models is missing or wrong. Each may be "id" or "id:contextWindow".' },
       protocol: { type: 'string', description: 'Wire dialect: "openai" (Chat Completions, the default) or "anthropic" (Messages).' },
+      streamUsage: { type: 'string', description: 'Set to "0" when the gateway rejects the OpenAI `stream_options` field with a 400 (some self-hosted and relay gateways do). Default is to send it, which is how token usage arrives on the last chunk.' },
       importKey: { type: 'string', description: 'Set to "1" to also copy the key into the environment under apiKeyEnv, so the record holds only the variable name.' },
     }),
     output: textOutput(),
@@ -282,6 +283,12 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
         if (args.apiKey) auth.apiKey = String(args.apiKey).trim()
         if (args.apiKeyEnv) auth.apiKeyEnv = String(args.apiKeyEnv).trim()
         if (args.protocol === 'anthropic') auth.compat = { protocol: 'anthropic' }
+        const streamUsage = booleanish(args.streamUsage)
+        if (streamUsage !== undefined) {
+          // 只写这一个开关，别把 `protocol` 顺手带进来：`compatOf()` 会用默认值补齐其余字段，
+          // 而多写一个键就等于替用户表态了一件他没说过的事。
+          auth.compat = { ...(auth.compat ?? {}), streamUsage }
+        }
         const models = parseModelList(args.models)
         if (models.length > 0) auth.models = models
 
@@ -324,6 +331,21 @@ function parseModelList(raw) {
   return out
 }
 
+/**
+ * 名字暗示真假的字符串 → 真/假/未表态。
+ *
+ * 收 `1/0`、`true/false`、`yes/no`、`on/off`；**认不出来就返回 undefined**，
+ * 让调用方保持默认值，而不是把一个看不懂的词猜成 false。
+ */
+function booleanish(raw) {
+  if (raw === undefined || raw === null) return undefined
+  const text = String(raw).trim().toLowerCase()
+  if (text.length === 0) return undefined
+  if (['1', 'true', 'yes', 'on'].includes(text)) return true
+  if (['0', 'false', 'no', 'off'].includes(text)) return false
+  return undefined
+}
+
 /** `importKey=1`：把密钥挪进环境变量，记录里只留变量名。 */
 function applyEnvImport(auth, args) {
   if (String(args.importKey ?? '') !== '1' || !auth.apiKey) return undefined
@@ -335,4 +357,4 @@ function applyEnvImport(auth, args) {
     + '要让它在重启后仍然存在，请把它写进 shell 配置或 DSH 的环境，然后重新添加一次这个账号。'
 }
 
-export { compileParameters, humanize, parseModelList, applyEnvImport }
+export { compileParameters, humanize, parseModelList, applyEnvImport, booleanish }

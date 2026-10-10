@@ -422,7 +422,7 @@ docs/
 > 告诉上游「这不是 Claude Code，是一个第三方桥」。已改为与官方客户端逐字一致的措辞，
 > 并有测试钉住「system 里不许出现 bridge / harness」。
 
-## 四条真机/源码才暴露的契约（已钉成回归测试）
+## 五条真机/源码才暴露的契约（已钉成回归测试）
 
 1. **适配器是鸭子类型，但少一个方法就当场注册失败。**
    `registerAdapter` 在注册时**无条件**调用 `adapter.providerRetryPolicy(provider)`；
@@ -449,6 +449,20 @@ docs/
    是常态（把事件名写在 `payload.type` 里）。现在按 `'message' | undefined` 显式回退。
    → 见 `test/anthropic.test.js` 里那例「自己造响应、不用 `sseResponse`」的用例：
    那个辅助函数**总是**会写出一行 `event:`，表达不了「没有事件名」这件事。
+
+5. **失败码要靠 `error.failure` 才能活着走到用户面前，而那个对象少一个字段就整份作废。**
+   宿主把适配器抛出的异常转成 `{type:'finish', reason:{kind:'error', failure}}`，转换函数是
+   `@deepseek-ai/dsh-llm` 的 `normalizeLlmFailure()`：它只认「错误自己是 `HarnessError`」或
+   「错误上挂着一个 `failure` 快照，且快照的 `code` 与错误的 `code` 相等」两条路，
+   否则 `harnessErrorCode()` 一律返回 `"UNKNOWN"`。我们抛的是普通 `Error` 加一个 `.code`，
+   两样都不占 ⇒ **每个族的失败码在 UI 与日志里都变成 `UNKNOWN`**，
+   「令牌废了」和「中间有个东西挡着」再也分不出来。
+   更阴的是 `failureSnapshot()` 的校验方式：`message` / `code` 必须是非空字符串，
+   `status` 必须是 100..599 的整数，**任何一项不合格都会把整份快照判成 `undefined`**
+   （不是忽略那一个字段）。我们原先挂了 `failure` 却漏了 `message`，于是这条路早就在、
+   却一直没通。
+   → 见 `src/failure.js`、`src/wire/http-error.js` 与 `test/failure.test.js`
+   （那个文件里第一条用例是宿主算法的**复刻**：抄它的判定顺序，断言我们的错误真能过它）。
 
 ## 测试
 
@@ -488,6 +502,22 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   里不存在的服务会让 entry 永久 pending，而 loader 把 pending 当 **profile 加载失败**。
 - **流式换号只在「一个字都还没吐出去」时做**。`block-start` 不算输出，`block-end` 带内容才算；
   一旦有实质输出，失败只能记健康状态，绝不重放（否则用户会看到重复文本）。
+- **「思考」也不算输出，但憋着有三个上限**（`src/pool.js`）。这条值得单独讲：Claude 会在
+  想了 10–25 秒之后用安全策略**拒绝整轮**。把 `reasoning-delta` 当成「已经输出了」，
+  用户吃到的就是那条拒绝，而**下一个账号从来没被问过**。
+
+  | 条件 | 窗口 | 为什么 |
+  |---|---|---|
+  | 连思考都没有 | **15 秒** | 上游拿着连接不说话 |
+  | 只有思考，且这一族会「想完就拒」 | **4 分钟** | Claude / GPT / Gemini 系会想很久再拒 |
+  | 缓冲超过 1 MiB | 立即 | 防一个疯狂输出的上游把内存吃光 |
+
+  **到期一律原样放行，不是丢弃**——代价是放行之后就不能再换号了（调用方已经看见了那些块）。
+  不「想完就拒」的族（GLM、DeepSeek、Kimi、MiniMax…）仍在第一个思考事件上就提交：
+  把它们憋住会让思考在正文开始时**一次性吐出来**。判据按**模型名**而定，不按族
+  （`generic`/`copilot`/`trae` 一个族里什么模型都有）。
+  **憋住期间不发保活**：那是外层网关（magpie / CLIProxyAPI）才有的动作，我们是进程内 adapter，
+  没有能写 SSE 注释的那一层，宿主也没有流空闲超时（`dsh-llm` 里 `idle`/`stall`/`keepalive` 零命中）。
 - **会话粘性**：同一会话尽量用同一个账号，保住上游的 prompt cache；粘性键取会话里
   第一条 user 消息的 id（历史会被重放，所以这个键跨轮稳定）。
 - **刷新按账号合并 in-flight promise**：refresh token 通常一次性轮换，并发刷新会把账号踢下线。
