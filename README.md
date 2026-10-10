@@ -3,12 +3,18 @@
 把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
 统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
 
-> 状态：**P2.5 + MiniMax Code**（骨架 + Codex 族 + Claude 族 + Antigravity 族 + 本机账号统一发现
-> + `minimax` 族，即计划书 P6 的第一族）。
-> 四条 route 已在真实 DSH 宿主里验证可见（provider / 模型目录 / 登录流 / 工具面）；
-> Antigravity 与 MiniMax Code 两族已跑通真实推理；本机发现 → 一键导入 → 模型出现在选择器，
-> 这条链路已在真机上走通。
-> 尚未跑过 Codex/Claude 的真实登录，也还没有客户端 UI。
+> 状态：**P6 完成**——骨架 + 11 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> `workbuddy` / `commandcode` / `grok` / `copilot` / `trae` / `generic`）+ 本机账号统一发现 +
+> 设置页账号池面板 + `/pool` 命令族。11 条 route 已在真实 DSH 宿主里验证可见
+> （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
+> **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族单测齐全但**没有可用的真账号**，
+> 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
+>
+> 当前进行中：**P7 深度改进**（见 `dsh-account-bridge-深度改进计划书.md`）——修「对上游不诚实」
+> 与「账号选得不对」这两类问题，11 个工作包。
+>
+> 许可：**MIT**。借用的上游代码逐条记在 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)，
+> 并由 `test/notices.test.js` 双向强制（借了没登记、登记了文件不存在，都会红）。
 
 ## 它和「key 级接入」的区别
 
@@ -333,6 +339,8 @@ export ELECTRON_RUN_AS_NODE=1
 ## 目录结构
 
 ```
+LICENSE                 MIT
+THIRD_PARTY_NOTICES.md  借用了哪些上游代码、以什么许可借的、用在哪里
 src/
   index.js            插件入口：apply / name / inject
   api.js              回环 HTTP 数据面（面板用的 POST /account-bridge/<action>）
@@ -379,6 +387,7 @@ test/
   mini-react.js       够用的迷你 React（本仓库不把真 React 拉成 devDependency）
   responses.test.js   Responses 流翻译层（**原先零覆盖，两个真 bug 就藏在这里**）
   commands.test.js    `/pool` 命令族（含一个照抄宿主校验规则的假 `commands` 服务）
+  notices.test.js     许可与署名台账的双向自检（借了没登记 / 登记了文件不存在，都会红）
   fixtures/           COSY 定标向量 + Python 第二实现复核器（**树里没有任何私钥**）
 docs/
   family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
@@ -419,12 +428,12 @@ docs/
 ## 测试
 
 ```bash
-node --test "test/*.test.js"
+npm test          # 等价于 node --test "test/*.test.js"
 ```
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**700 个用例，688 通过，0 失败，12 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**705 个用例，692 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash

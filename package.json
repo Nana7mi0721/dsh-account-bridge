@@ -14,10 +14,14 @@
     },
     "./package.json": "./package.json"
   },
+  "scripts": {
+    "test": "node --test \"test/*.test.js\""
+  },
   "files": [
     "src",
     "cordis.patch.yml",
-    "README.md"
+    "README.md",
+    "THIRD_PARTY_NOTICES.md"
   ],
   "engines": {
     "node": ">=20"
