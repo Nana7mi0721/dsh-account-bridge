@@ -86,3 +86,63 @@ test('no source file imports a @deepseek-ai package by bare specifier', async ()
       'reach them through ctx services instead (verified on a real host: ERR_MODULE_NOT_FOUND)',
   )
 })
+
+/**
+ * 接受了 `onDiagnostic` 的翻译函数——漏传就等于那一路的诊断**只存在于测试里**。
+ *
+ * 这条守卫是被一次真实疏漏逼出来的：W8 把十二条诊断码加进翻译层、单测全绿，但
+ * `translateChatStream` 的三个调用点（generic / workbuddy / copilot）一个都没传
+ * `onDiagnostic`，`translateResponsesStream`、`translateGrokStream`、两处
+ * `toResponsesInput`、三处 `toAnthropicMessages` 同样。翻译层于是「会报告」，
+ * 而生产路径上永远没有人在听——比不报告更糟，因为它让文档里那句话变成假的。
+ */
+const DIAGNOSTIC_AWARE = [
+  'toAnthropicMessages',
+  'toChatMessages',
+  'translateAnthropicStream',
+  'translateChatStream',
+  'translateResponsesStream',
+  'translateGrokStream',
+  'translateCommandCodeStream',
+  'toResponsesInput',
+  'buildGrokBody',
+]
+
+/** 从 `名字(` 之后的左括号开始，配平括号，返回整段调用。 */
+function callAt(text, start) {
+  let depth = 0
+  for (let i = start; i < text.length; i += 1) {
+    const ch = text[i]
+    if (ch === '(') depth += 1
+    else if (ch === ')') {
+      depth -= 1
+      if (depth === 0) return text.slice(start, i + 1)
+    }
+  }
+  return text.slice(start)
+}
+
+test('every family passes onDiagnostic to the translators that accept one', async () => {
+  const offences = []
+  const dir = path.join(SRC_DIR, 'families')
+  for (const entry of await readdir(dir, { withFileTypes: true })) {
+    if (!entry.isFile() || !entry.name.endsWith('.js')) continue
+    const file = path.join(dir, entry.name)
+    const text = await readFile(file, 'utf8')
+    for (const name of DIAGNOSTIC_AWARE) {
+      const pattern = new RegExp(`\\b${name}\\s*\\(`, 'g')
+      for (const match of text.matchAll(pattern)) {
+        const call = callAt(text, match.index + match[0].length - 1)
+        if (!call.includes('onDiagnostic')) {
+          offences.push(`${entry.name}: ${name}(…) has no onDiagnostic`)
+        }
+      }
+    }
+  }
+  assert.deepEqual(
+    offences,
+    [],
+    'a translator that can report but is never given a reporter is worse than one that ' +
+      'stays silent: the docs claim it reports. Pass onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic).',
+  )
+})

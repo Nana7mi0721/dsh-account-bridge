@@ -118,6 +118,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 /pool unfreeze [族] [账号]   清掉冷却，让号立刻重新参与调度（`thaw` 同义）
 /pool sticky [模式]          看/切会话粘性：auto（默认）| session | turn | off
 /pool sticky forget [族]     **忘掉**记着的会话亲和（不写族名就是全部）
+/pool lost                   最近 8 次请求里翻译层丢掉了什么（`diagnostics` 同义）
 ```
 
 **`/pool sticky` 会解释每一次换号。** 它把最近 12 条裁决翻成人话印出来，例如
@@ -402,6 +403,8 @@ src/
     copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
     trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
+    failure-words.js  失败词表：同一个 429 的两条路说同一句话（见「设计要点」）
+    diagnostics.js    翻译层的结构化诊断（只上报不抛错，有界、去噪、去重）
     identity.js       上游身份：成套的头 + 按账号分的会话命名空间（见下面「会话身份」）
   families/
     codex.js          Codex 族（协议常量、登录、目录、额度、推理）
@@ -508,7 +511,7 @@ npm test          # 等价于 node --test "test/*.test.js"
 
 注意 `node --test test/`（目录形式）在 Node v24 上会报 `Cannot find module .../test`，要写 glob。
 
-当前：**951 个用例，938 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
+当前：**994 个用例，981 通过，0 失败，13 跳过**（跳过的是各族的真机联网用例——它们要么每回合烧掉真实额度，
 要么本机根本没有那种账号；不该在每次 `npm test` 时都跑）：
 
 ```bash
@@ -686,6 +689,67 @@ MiniMax Code 那一族没有对应的联网测试：它的令牌是一次性的�
   它只用来给未实现族挂一句提示，不流向写盘，少说一句比对着读不动的路径宣称「你装过」好。
   **别的地方不许照抄这个取舍。** 回归测试在 `test/unknown-not-empty.test.js`（另加
   `test/minimax.test.js`、`test/grok.test.js` 里的六条），每条都验证过「改回旧实现就会失败」。
+- **翻译层不再静默丢东西**（`src/wire/diagnostics.js`）。协议之间做转换，总有表达不了的东西；
+  过去的做法是 `default: break`——**连「丢了什么」都不说**。代价不是理论上的：`pause_turn`
+  落进 `default` 让「被服务端工具暂停的一轮」看起来像正常说完了；`output_index ?? 0`
+  在缺字段时关掉第 0 个块，同一段文本吐两遍；带着解析不出来的参数的工具调用被**空着参数**
+  发出去，模型收到的是一个没给参数的调用。现在每个丢点都发一条结构化诊断：
+
+  ```js
+  { code, path, message, severity, phase }   // severity: 'warning' | 'error'
+  ```
+
+  `warning` = 展示层差异（模型看不到的东西、界面上少一块）；`error` = **内容或工具行为变了**。
+  转换器**只上报、不抛错**——策略留给调用方。十二条码，全部有测试：`TOOL_ARGUMENTS_UNPARSABLE`、
+  `TOOL_CALL_WITHOUT_NAME`、`UNKNOWN_BLOCK_TYPE`、`UNRENDERED_BLOCK_TYPE`（同一个词在请求方向
+  与流方向分开，因为「模型看不到」和「用户看不到」是两件事）、`IMAGE_WITHOUT_DATA`、
+  `UNHANDLED_DELTA_TYPE`、`UNKNOWN_STREAM_EVENT`、`UNRENDERED_ITEM_TYPE`、
+  `UNKNOWN_STOP_REASON`、`REPLAY_STATE_MISSING`、`CONTINUATION_STATE_LOST`、`EMPTY_RESPONSE`。
+
+  三条自律写进了代码注释：**去噪**（`response.created` 这类本来就不带内容的事件不报，
+  回放关掉时跳过思考块也不报——那是用户选的）、**有界**（默认留 64 条，按 `code`+`path`
+  去重合并且数 `count`）、**永不抛**（诊断自己炸了不能连累这一轮请求）。
+  `Diagnostics.summary()` 给面板与日志一句人话，`hasErrors` 用来区分「只是少看见点东西」
+  与「这轮结果不能信」。
+
+  **报告要有人在听才算数。** 池子是那个人：它给每次请求开一本**独立的**账（一个坏掉的流
+  不该把接下来十轮的日志都染上它的味道），把账本通过 `onDiagnostic` 交给族，一轮结束后
+  `lost content: IMAGE_WITHOUT_DATA×2` 这样**只说一句**（有 `error` 级走 `warn`，否则 `info`），
+  并且把账本留在内存里。调用方中途放弃（用户按了停止、宿主换了账号）
+  时账本照样落地——`finally` 里收尾，那正是最需要知道「刚才丢了什么」的时刻。
+
+  **账本留最近 8 次请求，报的是最近一次真的丢了东西的那次**，不是字面上的最后一次。
+  真机验收时被这件事绊了一下：agent 一轮里有好几次请求，最后一次常常是干净的（回传工具
+  结果那一轮），只留最后一次的账本就变成了「你刚看见模型没读到你的图片，去查，它说
+  『什么都没丢』」。所以 `/pool lost` 说的是「最近 8 次里有 1 次丢了东西，下面是最新那一次」，
+  环里从来没丢过时才说「什么都没丢」，一次请求都还没走过时说「还没有走过一次请求」——
+  这三句话对应三种该做的事，不能合成一句。
+
+  **日志那一行只是顺手，不是观测面。** 桌面版里 `ctx.logger` 写到哪由宿主决定；headless
+  跑的时候它连 stdout 都不落——真机验过：同一个 logger 说一句话，日志里一个字都没有。
+  所以「刚才到底丢了什么」要看的是**内存里那本账**，两个门都开着：`/pool lost` 命令，
+  和 `POST /account-bridge/diagnostics`（面板走的就是后者）。
+
+  这条链子上有一个**测试脚手架抓不到**的坑：`src/pool.js` 递给族的那一大坨 options 是
+  **逐字段拼出来的，不是 `...options` 展开的**，所以 `onDiagnostic` 必须显式写进去。漏写的
+  后果是「翻译层会报告、单测全绿、文档说它记下来了，而生产路径上一个人都没听见」——
+  比不报告更糟。现在有两个守卫盯着：`test/pool.test.js` 验账本真的收到了、说的是哪句话、
+  下一轮是不是干净的；`test/contract.test.js` **静态扫描 `src/families/*.js`**，凡是调用了
+  接受 `onDiagnostic` 的翻译函数却没传的，直接失败（这条守卫写出来时就抓到了 copilot 一处真实漏写）。
+- **golden 快照**（`test/golden/`）。五条翻译线 × 请求/流两个方向，逐字节钉住。
+  单测能保住「我知道的那条规则」，保不住「我不知道的那条也被改动了」——
+  W4/W8 抓到的四条缺陷**全部**属于后者（`pause_turn`、`output_index ?? 0`、静默发出的
+  `stream_options`、收尾把流过的思考换成空块）。用法：
+
+  ```bash
+  node --test test/golden.test.js                  # 比对
+  UPDATE_GOLDEN=1 node --test test/golden.test.js  # 重生成（重生成后读一遍 diff 再提交）
+  ```
+
+  快照红了先看 diff，**不许**直接 `UPDATE_GOLDEN=1` 抹平；重生成必须把新文件一起提交，
+  否则下一个人拿到的是「默认通过」的假绿。`normalise()` 只兜底长 hex 与 base64——
+  翻译层是纯函数，真归一化掉了一个值说明有东西在凭空造 id，那是要先修代码的。
+  用例表与磁盘上的快照有一一对应的守卫（删用例留下僵尸文件会红）。
 
 ## 族的状态与取舍
 

@@ -57,6 +57,7 @@ import {
   fingerprintError,
 } from '../wire/grok.js'
 import { accountScopedSession } from '../wire/identity.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { decodeJwtPayload, tryJson, withSource } from '../util.js'
 
 /** 身份命名空间用的族名（与 `family.id` 一致；写死是为了改 id 时会当场露馅）。 */
@@ -434,6 +435,7 @@ export const grokFamily = {
       promptCacheKey: scopeCacheKey(account, session) ?? accountCacheKey(auth),
       // effort 只在目录证明这个模型支持它时才发——猜一个档位会 400。
       effort: effortFor(model, effort) ? effort : undefined,
+      onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
     })
     const response = await ctx.fetch(
       grokResponsesUrl(auth),
@@ -454,7 +456,7 @@ export const grokFamily = {
       const text = await reply.text().catch(() => '')
       throw failureOf(reply, text)
     }
-    yield* translateGrokStream(reply, { signal })
+    yield* translateGrokStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
   },
 }
 

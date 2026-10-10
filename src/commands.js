@@ -31,6 +31,7 @@ export const USAGE = [
   '`/pool unfreeze [族] [账号]` —— 清掉冷却，让号立刻重新参与调度',
   '`/pool sticky [auto|session|turn|off]` —— 看/改会话粘性，以及「这段会话为什么粘它」',
   '`/pool sticky forget [族]` —— 丢掉粘性记录（下次重新选号）',
+  '`/pool lost` —— 最近一次请求里翻译层丢掉了什么（哪些东西模型没看到）',
 ].join('\n')
 
 /** 「为什么粘它/不粘」那 11 个裁决说成人话。 */
@@ -282,6 +283,71 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
     return { kind: 'success', text: lines.join('\n') }
   }
 
+  /**
+   * 诊断码 → 人话。**只解释「丢了什么」，不解释「为什么」**——理由是上游的事，
+   * 我们只能说清自己这边少收到了什么。
+   */
+  const LOST_TEXT = {
+    UNKNOWN_BLOCK_TYPE: '历史里有一种块我们不认识，整块没发给上游（模型没看到它）',
+    IMAGE_WITHOUT_DATA: '图片没有可用的数据，没能发给上游（模型没看到这张图）',
+    REPLAY_STATE_MISSING: '该回放的思考签名/加密内容没存下来，这一块没往回发（上游可能因此重算）',
+    CONTINUATION_STATE_LOST: '上游要的续传态我们表达不出来，这一轮只能当普通结束',
+    TOOL_ARGUMENTS_UNPARSABLE: '工具参数不是合法 JSON，参数被当成空对象发出去了（工具行为变了）',
+    TOOL_CALL_WITHOUT_NAME: '上游给了一个没有名字的工具调用，没法转给宿主',
+    UNRENDERED_BLOCK_TYPE: '流里出现了一种我们不会渲染的块，这段内容在界面上不存在',
+    UNRENDERED_ITEM_TYPE: '流里出现了一种我们不会渲染的条目，这段内容在界面上不存在',
+    UNHANDLED_DELTA_TYPE: '流里出现了一种我们不认识的增量类型，这段内容丢了',
+    UNKNOWN_STREAM_EVENT: '流里出现了一种我们不认识的事件，整条忽略',
+    UNKNOWN_STOP_REASON: '上游给了一个我们不认识的停止原因，被当成正常结束（可能其实没说完）',
+  }
+
+  async function lostText() {
+    const book = adapter.diagnostics?.()
+    const entries = book?.entries ?? []
+    const requests = book?.requests
+    const dirty = book?.lostRequests ?? 0
+    // 报的是**最近一次真的丢了东西的**请求，不是字面上的「最后一次请求」：
+    // agent 一轮里最后一次请求常常是干净的（回传工具结果那一轮），那样会说「什么都没丢」，
+    // 而用户刚刚才看见模型没读到他的图片。
+    const lines = ['### 翻译层丢掉了什么（最近 8 次请求里丢得最凶的那一次）', '']
+    if (entries.length === 0) {
+      lines.push(
+        requests === 0
+          ? '还没有走过一次请求。'
+          : requests === undefined
+            ? '什么都没丢——上游说的每一句我们都听懂了，也都表达得出来。'
+            : `最近 **${requests}** 次请求**什么都没丢**——上游说的每一句我们都听懂了，也都表达得出来。`,
+      )
+      return { kind: 'success', text: lines.join('\n') }
+    }
+    lines.push(
+      dirty > 1
+        ? `最近 **${requests}** 次请求里有 **${dirty}** 次丢了东西，下面是最新那一次（${book.family ?? '—'}）。`
+        : `最近 **${requests}** 次请求里有 **1** 次丢了东西（${book.family ?? '—'}）。`,
+    )
+    lines.push('')
+    lines.push(
+      book.hasErrors
+        ? '⚠️ 有 `error` 级：**模型或工具真的少收到了东西**，不只是界面上少显示一段。'
+        : '只有 `warning` 级：界面上少显示了一段，内容本身没变。',
+    )
+    lines.push('')
+    lines.push('| 严重性 | 位置 | 码 | 次数 | 说明 |')
+    lines.push('|---|---|---|---|---|')
+    for (const entry of entries) {
+      const where = entry.path ?? '—'
+      const what = LOST_TEXT[entry.code] ?? entry.message
+      lines.push(`| ${entry.severity} | \`${where}\` | \`${entry.code}\` | ${entry.count} | ${what} |`)
+    }
+    if ((book.dropped ?? 0) > 0) {
+      lines.push('')
+      lines.push(`另有 **${book.dropped}** 条因为超过上限被丢掉（同一个位置只留第一次）。`)
+    }
+    lines.push('')
+    lines.push('`error` 级值得查：多半是上游换了字段名，或者某个历史块类型我们还不支持。')
+    return { kind: 'success', text: lines.join('\n') }
+  }
+
   async function handler({ rawInput }) {
     const [verb, ...rest] = splitInput(rawInput)
     try {
@@ -297,6 +363,9 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
         case 'sticky':
         case 'affinity':
           return await stickyText(rest[0], rest[1])
+        case 'lost':
+        case 'diagnostics':
+          return await lostText()
         default:
           return { kind: 'error', text: `不认识的子命令 \`${verb}\`。\n\n${USAGE}` }
       }
@@ -308,8 +377,8 @@ export function createPoolCommand({ adapter, store, families, ctx, log }) {
 
   return {
     name: COMMAND_NAME,
-    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号、看会话粘性',
-    input: { hint: '[status|check|unfreeze|sticky] [族] [账号]' },
+    description: '账号池：看每族账号与健康、真查一次额度、解冻冷却中的账号、看会话粘性与翻译损失',
+    input: { hint: '[status|check|unfreeze|sticky|lost] [族] [账号]' },
     handler,
   }
 }

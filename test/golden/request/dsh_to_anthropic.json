@@ -1,0 +1,58 @@
+[
+  {
+    "content": [
+      {
+        "text": "What is in this picture?",
+        "type": "text"
+      },
+      {
+        "source": {
+          "data": "iVBORw0KGgoAAAANSUhEUg==",
+          "media_type": "image/png",
+          "type": "base64"
+        },
+        "type": "image"
+      }
+    ],
+    "role": "user"
+  },
+  {
+    "content": [
+      {
+        "signature": "golden-signature",
+        "thinking": "Let me look at the bytes.",
+        "type": "thinking"
+      },
+      {
+        "text": "It is a tiny PNG. Let me check the file.",
+        "type": "text"
+      },
+      {
+        "id": "call_golden_1",
+        "input": {
+          "path": "a.png"
+        },
+        "name": "read_file",
+        "type": "tool_use"
+      }
+    ],
+    "role": "assistant"
+  },
+  {
+    "content": [
+      {
+        "content": "PNG, 1x1, 68 bytes",
+        "tool_use_id": "call_golden_1",
+        "type": "tool_result"
+      },
+      {
+        "cache_control": {
+          "type": "ephemeral"
+        },
+        "text": "Thanks. Anything else?",
+        "type": "text"
+      }
+    ],
+    "role": "user"
+  }
+]

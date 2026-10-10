@@ -1,0 +1,92 @@
+[
+  {
+    "blockType": "reasoning",
+    "index": 0,
+    "type": "block-start"
+  },
+  {
+    "index": 0,
+    "text": "Thinking about it",
+    "type": "reasoning-delta"
+  },
+  {
+    "block": {
+      "text": "Thinking about it",
+      "type": "reasoning"
+    },
+    "index": 0,
+    "type": "block-end"
+  },
+  {
+    "blockType": "text",
+    "index": 1,
+    "type": "block-start"
+  },
+  {
+    "index": 1,
+    "text": "It is a PNG.",
+    "type": "text-delta"
+  },
+  {
+    "block": {
+      "text": "It is a PNG.",
+      "type": "text"
+    },
+    "index": 1,
+    "type": "block-end"
+  },
+  {
+    "blockType": "tool-call",
+    "index": 2,
+    "type": "block-start"
+  },
+  {
+    "argumentsDelta": "{\"path\":\"a.png\"}",
+    "id": "call_golden_1",
+    "index": 2,
+    "type": "tool-call-delta"
+  },
+  {
+    "block": {
+      "arguments": "{\"path\":\"a.png\"}",
+      "id": "call_golden_1",
+      "name": "read_file",
+      "type": "tool-call"
+    },
+    "index": 2,
+    "type": "block-end"
+  },
+  {
+    "type": "usage",
+    "usage": {
+      "inputTokens": 1200,
+      "outputTokens": 42
+    }
+  },
+  {
+    "reason": {
+      "kind": "tool-calls"
+    },
+    "replayState": {
+      "blocks": [
+        {
+          "encryptedContent": "golden-encrypted-blob",
+          "id": "rs_1",
+          "type": "reasoning"
+        },
+        {
+          "type": "text"
+        },
+        {
+          "type": "tool-call"
+        }
+      ],
+      "response": {
+        "kind": "account-bridge/responses",
+        "model": "golden-model",
+        "version": 1
+      }
+    },
+    "type": "finish"
+  }
+]

@@ -23,6 +23,7 @@
 
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
+import { diagnosticReporter } from './diagnostics.js'
 
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
@@ -73,8 +74,9 @@ export function toChatSystem(system, messages = []) {
  *   OpenAI 是这么定义的，而且 `tool_call_id` 必须与前面那条 assistant 的
  *   `tool_calls[].id` 对上，对不上就是 400。
  */
-export function toChatMessages(messages) {
+export function toChatMessages(messages, { onDiagnostic } = {}) {
   const out = []
+  const report = diagnosticReporter(undefined, onDiagnostic)
   const start = conversationStart(messages)
 
   for (const [index, message] of messages.entries()) {
@@ -96,7 +98,7 @@ export function toChatMessages(messages) {
     const toolCalls = []
     const plain = []
 
-    for (const block of message.content ?? []) {
+    for (const [blockIndex, block] of (message.content ?? []).entries()) {
       switch (block.type) {
         case 'text':
           if (message.role === 'system') {
@@ -134,9 +136,28 @@ export function toChatMessages(messages) {
               type: 'image_url',
               image_url: { url: `data:${block.mediaType ?? 'image/png'};base64,${block.data}` },
             })
+          } else {
+            // 模型看不到这张图，而调用方以为它看到了。
+            report?.({
+              code: 'IMAGE_WITHOUT_DATA',
+              severity: 'error',
+              phase: 'request',
+              path: `messages[${index}].content[${blockIndex}]`,
+              message:
+                'chat-completions: an image block has no base64 data, so the model will not see it',
+              from: block.mediaType,
+            })
           }
           break
         default:
+          report?.({
+            code: 'UNKNOWN_BLOCK_TYPE',
+            severity: 'error',
+            phase: 'request',
+            path: `messages[${index}].content[${blockIndex}]`,
+            message: `chat-completions: unknown content block type "${block.type}", dropped from the request`,
+            from: block.type,
+          })
           break
       }
     }
@@ -180,14 +201,31 @@ export function toChatTools(tools) {
  * 让 EMPTY_RESPONSE 那条闸去报错更准确，而 error 会触发换号重试——
  * 换一个账号照样会被内容策略拦，纯属浪费。
  */
-function finishKind(reason) {
+function finishKind(reason, report) {
   switch (reason) {
     case 'tool_calls':
     case 'function_call':
       return 'tool-calls'
     case 'length':
       return 'max-tokens'
+    case 'stop':
+    case 'content_filter':
+    case undefined:
+    case null:
+    case '':
+      return 'stop'
     default:
+      // 上游发明了一个新的 finish_reason。DSH 只认三个词，所以只能落到 `stop`——
+      // 但那句「我们把它当成正常结束了」必须说出来，否则「回答看起来是完整的、
+      // 其实是截断的」永远不会有人发现。
+      report?.({
+        code: 'UNKNOWN_STOP_REASON',
+        severity: 'warning',
+        phase: 'stream',
+        message: `chat-completions: unknown finish_reason "${reason}", reported as a normal stop`,
+        from: reason,
+        to: 'stop',
+      })
       return 'stop'
   }
 }
@@ -233,7 +271,8 @@ export function normaliseUsage(usage) {
  * 事件形态就是 `data: {...}` 一行一条，以 `data: [DONE]` 收尾。块下标由我们自己
  * 分配（上游没有块的概念），所以先看到的块下标更小。
  */
-export async function* translateChatStream(response, { signal } = {}) {
+export async function* translateChatStream(response, { signal, onDiagnostic } = {}) {
+  const report = diagnosticReporter(undefined, onDiagnostic)
   /** 上游 tool_calls[].index → 本地块下标。 */
   const toolSlots = new Map()
   let nextIndex = 0
@@ -319,6 +358,18 @@ export async function* translateChatStream(response, { signal } = {}) {
   if (reasoningIndex !== undefined) blocks.push([reasoningIndex, { type: 'reasoning', text: reasoning }])
   if (textIndex !== undefined) blocks.push([textIndex, { type: 'text', text }])
   for (const slot of toolSlots.values()) {
+    // 没有名字的工具调用：宿主拿到之后找不到这个工具，整轮就废在这里。
+    // 上游偶尔会先发一个只有 index 的空壳再补名字，所以这里只对**收尾时仍然没有名字**的报。
+    if (typeof slot.name !== 'string' || slot.name.length === 0) {
+      report?.({
+        code: 'TOOL_CALL_WITHOUT_NAME',
+        severity: 'error',
+        phase: 'stream',
+        path: `content[${slot.index}]`,
+        message: 'chat-completions: a tool call finished without a function name',
+        from: slot.id,
+      })
+    }
     blocks.push([
       slot.index,
       {
@@ -340,5 +391,5 @@ export async function* translateChatStream(response, { signal } = {}) {
     throw error
   }
   if (usage) yield { type: 'usage', usage }
-  yield { type: 'finish', reason: { kind: finishKind(finishReason) } }
+  yield { type: 'finish', reason: { kind: finishKind(finishReason, report) } }
 }

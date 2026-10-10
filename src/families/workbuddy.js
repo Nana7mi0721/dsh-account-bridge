@@ -59,6 +59,7 @@ import {
   regionOf,
 } from '../wire/workbuddy.js'
 import { withSource } from '../util.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 
 export { ID }
 export const DISPLAY_NAME = 'WorkBuddy（腾讯 CodeBuddy）'
@@ -609,7 +610,8 @@ export const workbuddyFamily = {
     const region = regionOfAuth(auth)
 
     const systemText = toChatSystem(system, messages)
-    const chatMessages = toChatMessages(messages)
+    const onDiagnostic = diagnosticReporter(ctx, options.onDiagnostic)
+    const chatMessages = toChatMessages(messages, { onDiagnostic })
     const declared = catalogCache.get(model)
     const limit = Math.max(1, Number(maxTokens) || declared?.maxTokens || DEFAULT_MAX_TOKENS)
     const level = normaliseEffort(effort)
@@ -634,7 +636,7 @@ export const workbuddyFamily = {
     const reply = await assertApiReply(response, { who: ID })
     if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), ID)
 
-    yield* translateChatStream(reply, { signal })
+    yield* translateChatStream(reply, { signal, onDiagnostic })
   },
 }
 

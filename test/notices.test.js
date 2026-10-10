@@ -39,6 +39,28 @@ function borrowTableRows() {
   return rows
 }
 
+/** 抓 `## 只学规格、未借用代码` 到下一个 `## ` 标题之间的所有表格行。 */
+function specTableRows() {
+  const text = read('THIRD_PARTY_NOTICES.md')
+  const start = text.indexOf('## 只学规格、未借用代码')
+  assert.ok(start >= 0, 'THIRD_PARTY_NOTICES.md 里找不到 "## 只学规格、未借用代码" 一节')
+  const rest = text.slice(start + 1)
+  const next = rest.indexOf('\n## ')
+  const body = next > 0 ? rest.slice(0, next) : rest
+
+  const rows = []
+  for (const line of body.split('\n')) {
+    if (!line.startsWith('|')) continue
+    const cells = line.split('|').map((c) => c.trim())
+    // 这一节的列是：上游 | 落地点 | 学的是什么
+    const [, upstream, usedIn] = cells
+    if (!upstream || upstream === '上游' || /^-+$/.test(upstream)) continue
+    if (!usedIn) continue
+    rows.push({ upstream, usedIn, line: line.trim() })
+  }
+  return rows
+}
+
 /** 从「用在本仓」单元格里挑出所有 `src/...` / `test/...` 路径。 */
 function filesIn(cell) {
   const out = []
@@ -96,9 +118,12 @@ test('台账里每一条「用在本仓」的文件都存在，且头部写着�
 })
 
 test('反方向：源码里声称「借自某上游」的，台账里必须有登记', () => {
-  const rows = borrowTableRows()
+  // 两节都算数：「借用的代码」与「只学规格、未借用代码」。区别在于前者还要过
+  // 下面那条 AGPL 守卫（不许出现 relaykit），后者不需要——它本来就不抄代码。
   const registered = new Set()
-  for (const row of rows) for (const rel of filesIn(row.usedIn)) registered.add(rel)
+  for (const row of [...borrowTableRows(), ...specTableRows()]) {
+    for (const rel of filesIn(row.usedIn)) registered.add(rel)
+  }
 
   const suspects = []
   for (const rel of jsFilesUnder('src')) {
@@ -109,7 +134,7 @@ test('反方向：源码里声称「借自某上游」的，台账里必须有�
   assert.deepEqual(
     suspects,
     [],
-    '这些文件自称借用了上游代码，却没在 THIRD_PARTY_NOTICES.md 的「借用的代码」里登记',
+    '这些文件自称借用了上游代码，却没在 THIRD_PARTY_NOTICES.md 的「借用的代码」或「只学规格、未借用代码」里登记',
   )
 })
 

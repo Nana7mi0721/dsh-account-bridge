@@ -8,7 +8,31 @@
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
 import { RESPONSES_REPLAY_KIND, makeEnvelope, replayItem } from './replay.js'
+import { diagnosticReporter } from './diagnostics.js'
 import { tryJson } from '../util.js'
+
+/**
+ * Responses 流里**我们知道它不带新内容**因而可以安静忽略的事件名。
+ *
+ * 剩下的一律报一条诊断：上游加了一个新事件而我们当没看见，正是「翻译层静默丢」的
+ * 起点。`grok.js` 也 import 这一份——xAI 的 Responses 线用的是同一套事件词汇。
+ */
+export const BENIGN_RESPONSE_EVENTS = new Set([
+  'response.created',
+  'response.in_progress',
+  'response.queued',
+  'response.content_part.added',
+  'response.content_part.done',
+  'response.output_text.done',
+  'response.reasoning_summary_part.added',
+  'response.reasoning_summary_part.done',
+  'response.reasoning_summary_text.done',
+  'response.reasoning_text.done',
+  'response.function_call_arguments.done',
+])
+
+/** Responses 流里我们**真的会渲染**的输出项类型。其余会开成一个文本块。 */
+export const RENDERED_ITEM_TYPES = new Set(['message', 'function_call', 'reasoning'])
 
 /**
  * 把 DSH 的 messages 拆成 Responses API 的 `instructions` + `input`。
@@ -23,18 +47,23 @@ import { tryJson } from '../util.js'
  * @param {{replay?: boolean}} [options]
  * @returns {{instructions?: string, input: Array<object>}}
  */
-export function toResponsesInput(messages, { replay = false } = {}) {
+export function toResponsesInput(messages, { replay = false, onDiagnostic } = {}) {
   const instructions = []
   const input = []
+  const report = diagnosticReporter(undefined, onDiagnostic)
 
-  for (const message of messages ?? []) {
+  for (const [msgIndex, message] of (messages ?? []).entries()) {
     if (message.role === 'system') {
       const text = textOf(message.content)
       if (text.length > 0) instructions.push(text)
       continue
     }
     if (message.role === 'user') {
-      input.push({ type: 'message', role: 'user', content: inputContent(message.content) })
+      input.push({
+        type: 'message',
+        role: 'user',
+        content: inputContent(message.content, report, `messages[${msgIndex}].content`),
+      })
       continue
     }
     if (message.role === 'assistant') {
@@ -44,7 +73,19 @@ export function toResponsesInput(messages, { replay = false } = {}) {
         // 加密内容时才回传：Responses 对「只有纯文本的 reasoning 项」是直接拒的。
         if (!replay) continue
         const item = replayItem(message, index, undefined)
-        if (!item) continue
+        if (!item) {
+          // 与 anthropic 线同一口径：关着回放时跳过是用户选的，不报；
+          // 开着却回放不了要留痕，否则续传态丢了没人知道。
+          report?.({
+            code: 'REPLAY_STATE_MISSING',
+            severity: 'warning',
+            phase: 'request',
+            path: `messages[${msgIndex}].content[${index}]`,
+            message:
+              'responses: replay is on but this reasoning block has no encrypted content, so it is left out',
+          })
+          continue
+        }
         input.push({
           type: 'reasoning',
           ...(item.id === undefined ? {} : { id: item.id }),
@@ -63,6 +104,19 @@ export function toResponsesInput(messages, { replay = false } = {}) {
           call_id: block.id,
           name: block.name,
           arguments: typeof block.arguments === 'string' ? block.arguments : JSON.stringify(block.arguments ?? {}),
+        })
+      }
+      // 助手轮里我们不认识的块（`file`、上游新增的类型…）是**模型看不到**的那种丢。
+      // `text` / `tool-call` 已经在上面各走各的路，`reasoning` 在回放关时是有意的。
+      for (const [index, block] of (message.content ?? []).entries()) {
+        if (block?.type === 'text' || block?.type === 'tool-call' || block?.type === 'reasoning') continue
+        report?.({
+          code: 'UNKNOWN_BLOCK_TYPE',
+          severity: 'error',
+          phase: 'request',
+          path: `messages[${msgIndex}].content[${index}]`,
+          message: `responses: unknown content block type "${block?.type}", dropped from the request`,
+          from: block?.type,
         })
       }
       continue
@@ -107,9 +161,9 @@ function textOf(content) {
 }
 
 /** 用户消息的内容数组：文本 + 图片（能识别的图片转 data URL，否则降级为文字占位）。 */
-function inputContent(content) {
+function inputContent(content, report, path = 'content') {
   const out = []
-  for (const block of Array.isArray(content) ? content : []) {
+  for (const [index, block] of (Array.isArray(content) ? content : []).entries()) {
     if (block?.type === 'text' && typeof block.text === 'string') {
       out.push({ type: 'input_text', text: block.text })
       continue
@@ -120,12 +174,31 @@ function inputContent(content) {
         out.push({ type: 'input_image', image_url: url })
         continue
       }
+      // 就地留一句 `[image omitted: …]` 是对调用方诚实，但对模型不是——
+      // 它确实没看到这张图，而调用方以为它看到了。
+      report?.({
+        code: 'IMAGE_WITHOUT_DATA',
+        severity: 'error',
+        phase: 'request',
+        path: `${path}[${index}]`,
+        message: 'responses: an image block has no usable data, so the model will not see it',
+        from: block.mediaType ?? block.mimeType ?? block.contentType,
+      })
       out.push({ type: 'input_text', text: '[image omitted: unsupported encoding]' })
       continue
     }
     if (block?.type === 'file') {
       out.push({ type: 'input_text', text: `[file omitted: ${block.name ?? 'attachment'}]` })
+      continue
     }
+    report?.({
+      code: 'UNKNOWN_BLOCK_TYPE',
+      severity: 'error',
+      phase: 'request',
+      path: `${path}[${index}]`,
+      message: `responses: unknown content block type "${block?.type}", dropped from the request`,
+      from: block?.type,
+    })
   }
   if (out.length === 0) out.push({ type: 'input_text', text: '' })
   return out
@@ -167,7 +240,8 @@ function toolOutputOf(message) {
  * @returns {AsyncGenerator<object>}
  */
 export async function* translateResponsesStream(response, options = {}) {
-  const { signal, onEvent, model, replay = false } = options
+  const { signal, onEvent, model, replay = false, onDiagnostic } = options
+  const report = diagnosticReporter(undefined, onDiagnostic)
   /** @type {Map<number, {blockType: string, block: object, callId?: string, name?: string}>} */
   const open = new Map()
   /** 已经发过 block-start 的 output_index（有些上游不发 output_item.added）。 */
@@ -196,6 +270,14 @@ export async function* translateResponsesStream(response, options = {}) {
   const indexByItemId = new Map()
   /** 这一轮有没有产出工具调用块——决定收尾是 `'tool-calls'` 还是 `'stop'`。 */
   let sawToolCall = false
+  /**
+   * 每个下标上已经流出去的文本。
+   *
+   * 存在的理由：`response.output_item.done` 里的项**可以**不带 `summary`/`content`，
+   * 而收尾块是权威的——没有这个兜底，一段刚才已经显示过的思考会在收尾时被换成空块。
+   * golden 快照第一次生成就把这件事照出来了（见 `test/golden/`）。
+   */
+  const streamedText = new Map()
   const begin = function* (index, blockType, seed = {}) {
     if (started.has(index)) return
     started.add(index)
@@ -222,6 +304,19 @@ export async function* translateResponsesStream(response, options = {}) {
       case 'response.output_item.added': {
         const index = payload.output_index ?? open.size
         const item = payload.item ?? {}
+        // 服务端工具（`web_search_call`、`computer_call`、`image_generation_call`、
+        // `mcp_call`…）落到这里就会被当成一段文本念给用户听。照常开块，但留痕。
+        if (!RENDERED_ITEM_TYPES.has(item.type)) {
+          report?.({
+            code: 'UNRENDERED_ITEM_TYPE',
+            severity: 'warning',
+            phase: 'stream',
+            path: `output[${index}]`,
+            message: `responses: output item type "${item.type}" has no DSH equivalent, opened as a text block`,
+            from: item.type,
+            to: 'text',
+          })
+        }
         const blockType = item.type === 'function_call' ? 'tool-call' : item.type === 'reasoning' ? 'reasoning' : 'text'
         if (typeof item.id === 'string') indexByItemId.set(item.id, index)
         yield* begin(index, blockType, { callId: item.call_id ?? item.id, name: item.name })
@@ -232,6 +327,7 @@ export async function* translateResponsesStream(response, options = {}) {
         const index = payload.output_index ?? indexByItemId.get(payload.item_id) ?? 0
         yield* begin(index, 'text')
         sawOutput = true
+        streamedText.set(index, (streamedText.get(index) ?? '') + (payload.delta ?? ''))
         yield { type: 'text-delta', index, text: payload.delta ?? '' }
         break
       }
@@ -240,6 +336,7 @@ export async function* translateResponsesStream(response, options = {}) {
         const index = payload.output_index ?? indexByItemId.get(payload.item_id) ?? 0
         yield* begin(index, 'reasoning')
         sawOutput = true
+        streamedText.set(index, (streamedText.get(index) ?? '') + (payload.delta ?? ''))
         yield { type: 'reasoning-delta', index, text: payload.delta ?? '' }
         break
       }
@@ -263,7 +360,7 @@ export async function* translateResponsesStream(response, options = {}) {
         // 顺序要紧：顶层 → 按 item.id 反查 → 最后才是 0。
         const index = payload.output_index ?? indexByItemId.get(item.id) ?? 0
         const entry = open.get(index) ?? {}
-        const block = blockFromItem(item, entry, replay)
+        const block = blockFromItem(item, entry, replay, streamedText.get(index) ?? '')
         if (block) {
           sawOutput = true
           if (block.type === 'tool-call') sawToolCall = true
@@ -297,6 +394,15 @@ export async function* translateResponsesStream(response, options = {}) {
         break
       }
       default:
+        if (typeof type === 'string' && type.length > 0 && !BENIGN_RESPONSE_EVENTS.has(type)) {
+          report?.({
+            code: 'UNKNOWN_STREAM_EVENT',
+            severity: 'warning',
+            phase: 'stream',
+            message: `responses: unknown stream event "${type}", ignored`,
+            from: type,
+          })
+        }
         break
     }
   }
@@ -318,6 +424,24 @@ export async function* translateResponsesStream(response, options = {}) {
   // 而实际上它在等工具结果——这一条以前是错的（永远回 'stop'），有回归用例钉住。
   const kind = finishReason === 'max-tokens' ? 'max-tokens' : sawToolCall ? 'tool-calls' : 'stop'
   const replayState = replayStateOf(order, replaySlots, model, replay)
+  // 回放开着、这一轮又有思考项，却一个字的加密内容都没拿到 ⇒ **续传态丢了**。
+  // RelayKit 把这件事记成 error 级（`continuation_state_lost`），理由是：它不是
+  // 展示层的差异，而是「下一轮要把这一轮的状态带回去」这条承诺落空了——只是它
+  // 落空得无声无息，直到某天用户发现模型忘了自己刚才想过什么。
+  if (replay === true && replayState === undefined) {
+    const reasoningBlock = [...replaySlots.values()].some((slot) => slot.type === 'reasoning')
+    if (reasoningBlock) {
+      report?.({
+        code: 'CONTINUATION_STATE_LOST',
+        severity: 'error',
+        phase: 'stream',
+        message:
+          'responses: replay is on but no encrypted reasoning content came back, so the continuation state is lost',
+        from: 'reasoning.encrypted_content',
+        to: 'nothing',
+      })
+    }
+  }
   yield { type: 'finish', reason: { kind }, ...(replayState === undefined ? {} : { replayState }) }
 }
 
@@ -363,7 +487,7 @@ function replayStateOf(order, slots, model, replay) {
 }
 
 /** 把 Responses 的输出项翻成 DSH 的完整块。 */
-function blockFromItem(item, entry, replay = false) {
+function blockFromItem(item, entry, replay = false, streamed = '') {
   if (item.type === 'function_call') {
     return {
       type: 'tool-call',
@@ -373,9 +497,13 @@ function blockFromItem(item, entry, replay = false) {
     }
   }
   if (item.type === 'reasoning') {
-    const text = (item.summary ?? item.content ?? [])
-      .map((part) => part?.text ?? '')
-      .join('')
+    // `done` 里的项是权威的；但它**可以**不带 `summary`/`content`（真机上见过），
+    // 那时用我们一路攒下来的增量——否则收尾会交出一个空块，
+    // 而界面上刚才明明已经显示过这段思考了。golden 快照第一次跑就是这么照出来的。
+    const text =
+      (item.summary ?? item.content ?? [])
+        .map((part) => part?.text ?? '')
+        .join('') || streamed
     if (text.length > 0) return { type: 'reasoning', text }
     // 只剩加密内容、一颗字都没有的思考项：默认仍然丢掉（老行为，界面上不该多出
     // 一个空的思考块）；只有在回放开着时才把它变成一个空块——那时它是这一轮
@@ -383,9 +511,10 @@ function blockFromItem(item, entry, replay = false) {
     const encrypted = typeof item.encrypted_content === 'string' && item.encrypted_content.length > 0
     return replay && encrypted ? { type: 'reasoning', text: '' } : undefined
   }
-  const text = (item.content ?? [])
-    .map((part) => part?.text ?? '')
-    .join('')
+  const text =
+    (item.content ?? [])
+      .map((part) => part?.text ?? '')
+      .join('') || streamed
   return text.length > 0 ? { type: 'text', text } : undefined
 }
 

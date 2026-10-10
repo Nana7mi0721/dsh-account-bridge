@@ -17,9 +17,31 @@
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
 import { ANTHROPIC_REPLAY_KIND, makeEnvelope, replayValue } from './replay.js'
+import { diagnosticReporter } from './diagnostics.js'
+import { clamp } from '../util.js'
 
 const SYSTEM_REMINDER_OPEN = '<system-reminder>'
 const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
+
+/**
+ * 流里我们**真的会渲染**的块类型。
+ *
+ * 其余（`redacted_thinking`、`server_tool_use`、`web_search_tool_result`、
+ * `code_execution_tool_result`…）会照常开一个**空文本块**——不开的话整条流的
+ * 下标就乱了——但那是一次静默的内容损失，所以每见一次报一条诊断。
+ *
+ * 这里刻意不做 RelayKit 那套 hosted-tool 全矩阵：我们 11 个族里只有 copilot 与
+ * grok 沾得到服务端工具，为它们建一张中央表是拿维护成本换一个没人用的功能。
+ */
+const RENDERED_BLOCK_TYPES = new Set(['text', 'thinking', 'tool_use'])
+
+/** 流里我们**真的会搬运**的 delta 类型。其余报一条诊断（`citations_delta` 是常客）。 */
+const HANDLED_DELTA_TYPES = new Set([
+  'text_delta',
+  'thinking_delta',
+  'input_json_delta',
+  'signature_delta',
+])
 
 /**
  * Claude Code 的身份块。订阅端点的请求会带 `x-app: cli` 与 CLI 的 UA，
@@ -33,16 +55,32 @@ const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
  */
 const CLAUDE_CODE_IDENTITY = "You are Claude Code, Anthropic's official CLI for Claude."
 
-/** 把工具参数解析成对象；解不开就当空对象（Anthropic 只接受对象）。 */
-function parseToolInput(raw) {
+/**
+ * 把工具参数解析成对象；解不开就当空对象（Anthropic 只接受对象）。
+ *
+ * **解不开这件事必须说出来。** `{}` 与「这个工具真的没有参数」发到上游是一模一样的，
+ * 于是一次参数写坏的调用会变成一次「工具被空着参数调用」——调用方查遍自己的代码
+ * 也找不到是谁把参数清空的。按 W8 的分档这是 `error`：内容与工具行为真的变了。
+ */
+function parseToolInput(raw, report, path) {
   if (raw === undefined || raw === null || raw === '') return {}
   if (typeof raw === 'object') return raw
+  const text = String(raw)
   try {
-    const parsed = JSON.parse(String(raw))
-    return parsed !== null && typeof parsed === 'object' ? parsed : {}
+    const parsed = JSON.parse(text)
+    if (parsed !== null && typeof parsed === 'object') return parsed
   } catch {
-    return {}
+    // 走下面统一报一次。
   }
+  report?.({
+    code: 'TOOL_ARGUMENTS_UNPARSABLE',
+    severity: 'error',
+    phase: 'request',
+    path,
+    message: `anthropic: tool arguments are not a JSON object, sent as {}: ${clamp(text, 200)}`,
+    from: clamp(text, 200),
+  })
+  return {}
 }
 
 /** 对话真正开始的位置（= 第一条非 system 消息的下标）。 */
@@ -99,8 +137,9 @@ export function toAnthropicSystem(system, messages = [], { identity = CLAUDE_COD
  * 而放一个空签名的块等于把「这里本来有思考」这件事说给上游听却拿不出证据。
  * 没有签名时这个块**整个跳过**——那是这一族从第一天起的既有行为。
  */
-export function toAnthropicMessages(messages, { cache = true, replay = false } = {}) {
+export function toAnthropicMessages(messages, { cache = true, replay = false, onDiagnostic } = {}) {
   const out = []
+  const report = diagnosticReporter(undefined, onDiagnostic)
   const start = conversationStart(messages)
   for (const [index, message] of messages.entries()) {
     // 开头的 system 消息归 toAnthropicSystem；后面的在这里当 user 文本。
@@ -129,6 +168,7 @@ export function toAnthropicMessages(messages, { cache = true, replay = false } =
     }
 
     for (const [blockIndex, block] of (message.content ?? []).entries()) {
+      const path = `messages[${index}].content[${blockIndex}]`
       switch (block.type) {
         case 'text':
           blocks.push({
@@ -143,8 +183,21 @@ export function toAnthropicMessages(messages, { cache = true, replay = false } =
           // 默认整块跳过（这一族以前就是这么做的）。开了回放也只有签名在手上才放。
           if (!replay || role !== 'assistant') break
           const signature = replayValue(message, ANTHROPIC_REPLAY_KIND, blockIndex, undefined)
-          if (signature === undefined) break
-          blocks.push({ type: 'thinking', thinking: block.text ?? '', signature })
+          if (signature === undefined) {
+            // `warning` 不是 `error`：这段思考上游本来就已经忘掉了，少的是我们这边的
+            // 展示，不是它看到的内容。但「开着回放却回放不了」必须留痕，否则
+            // continuation 丢了没人知道。
+            report?.({
+              code: 'REPLAY_STATE_MISSING',
+              severity: 'warning',
+              phase: 'request',
+              path,
+              message:
+                'anthropic: replay is on but this reasoning block has no signature, so it is left out',
+            })
+          } else {
+            blocks.push({ type: 'thinking', thinking: block.text ?? '', signature })
+          }
           break
         }
         case 'tool-call':
@@ -154,7 +207,7 @@ export function toAnthropicMessages(messages, { cache = true, replay = false } =
                   type: 'tool_use',
                   id: String(block.id),
                   name: block.name,
-                  input: parseToolInput(block.arguments),
+                  input: parseToolInput(block.arguments, report, path),
                 }
               : { type: 'text', text: `[tool call ${block.name}: ${block.arguments}]` },
           )
@@ -173,9 +226,28 @@ export function toAnthropicMessages(messages, { cache = true, replay = false } =
               type: 'image',
               source: { type: 'base64', media_type: block.mediaType ?? 'image/png', data: block.data },
             })
+          } else {
+            // 模型看不到这张图，而调用方以为它看到了——这就是 `error` 的定义。
+            report?.({
+              code: 'IMAGE_WITHOUT_DATA',
+              severity: 'error',
+              phase: 'request',
+              path,
+              message: 'anthropic: an image block has no base64 data, so the model will not see it',
+              from: block.mediaType,
+            })
           }
           break
         default:
+          // 不认识的块类型整块消失：模型看不到它，而且我们连它是什么都不知道。
+          report?.({
+            code: 'UNKNOWN_BLOCK_TYPE',
+            severity: 'error',
+            phase: 'request',
+            path,
+            message: `anthropic: unknown content block type "${block.type}", dropped from the request`,
+            from: block.type,
+          })
           break
       }
     }
@@ -250,8 +322,10 @@ function finishKind(stopReason, report) {
         report?.({
           code: 'UNKNOWN_STOP_REASON',
           severity: 'warning',
+          phase: 'stream',
           message: `anthropic: unknown stop_reason "${stopReason}", reported as a normal stop`,
-          detail: { raw: stopReason },
+          from: stopReason,
+          to: 'stop',
         })
       }
       return 'stop'
@@ -273,6 +347,7 @@ function finishKind(stopReason, report) {
  * 整个信封丢掉，还不如一开始就不写。
  */
 export async function* translateAnthropicStream(response, { signal, onDiagnostic, model } = {}) {
+  const report = diagnosticReporter(undefined, onDiagnostic)
   // 每个 block index 一份累积器：`block-end` 必须携带**完整**块对象。
   const accumulators = new Map()
   /**
@@ -332,6 +407,20 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
       case 'content_block_start': {
         const index = payload.index ?? 0
         const block = payload.content_block ?? {}
+        // 不认识的起始块类型：它会照常开一个「文本」块（否则整条流都会乱），
+        // 但这件事必须留痕——服务端工具（`server_tool_use`、`web_search_tool_result`…）
+        // 落到这里就是「我们把它当普通文本念给用户听了」。
+        if (!RENDERED_BLOCK_TYPES.has(block.type)) {
+          report?.({
+            code: 'UNRENDERED_BLOCK_TYPE',
+            severity: 'warning',
+            phase: 'stream',
+            path: `content[${index}]`,
+            message: `anthropic: content_block type "${block.type}" has no DSH equivalent, opened as an empty text block`,
+            from: block.type,
+            to: 'text',
+          })
+        }
         accumulators.set(index, {
           type: block.type,
           text: typeof block.text === 'string' ? block.text : '',
@@ -392,6 +481,17 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
           touch(index)
           const entry = replaySlots.get(index)
           if (entry) entry.signature = (entry.signature ?? '') + delta.signature
+        } else if (!HANDLED_DELTA_TYPES.has(delta.type)) {
+          // `citations_delta` 之类：DSH 的 chunk 里没有对应的说法，原样透传不出去，
+          // 但「模型引用了来源而界面上没有」是要让人知道的事。
+          report?.({
+            code: 'UNHANDLED_DELTA_TYPE',
+            severity: 'warning',
+            phase: 'stream',
+            path: `content[${index}]`,
+            message: `anthropic: content_block_delta type "${delta.type}" has no DSH equivalent, ignored`,
+            from: delta.type,
+          })
         }
         break
       }
@@ -408,7 +508,18 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
         if (payload.usage) usage = mergeUsageNonZero(usage, normaliseUsage(payload.usage))
         break
       }
+      case 'ping':
+      case 'message_stop':
+        // 保活与收尾信号。我们知道它们是什么，不产生 chunk 就是正确处置。
+        break
       default:
+        report?.({
+          code: 'UNKNOWN_STREAM_EVENT',
+          severity: 'warning',
+          phase: 'stream',
+          message: `anthropic: unknown stream event "${kind}", ignored`,
+          from: kind,
+        })
         break
     }
   }
@@ -425,7 +536,7 @@ export async function* translateAnthropicStream(response, { signal, onDiagnostic
     throw error
   }
   if (usage) yield { type: 'usage', usage }
-  const reason = { kind: finishKind(stopReason, onDiagnostic) }
+  const reason = { kind: finishKind(stopReason, report) }
   const replayState = replayEnvelope(order, replaySlots, model)
   yield { type: 'finish', reason, ...(replayState === undefined ? {} : { replayState }) }
 }

@@ -78,18 +78,30 @@
 
 ## 只学规格、未借用代码
 
-以下来源我们**只借鉴了设计与规则**（事实性的字段名、常量、判定顺序），没有复制任何可执行表达：
+以下来源我们**只借鉴了设计与规则**（事实性的字段名、常量、判定顺序），没有复制任何可执行表达。
+本节的表格**不受**「头部必须指向本文件」那条约束——恰恰相反，这一节的落地点里有些
+（比如 `src/wire/usage.js`）**故意不写上游的名字**，而另一些写了；两种都可以。
+本节只受一条约束：**写了名字的文件必须在这里登记**（`test/notices.test.js` 的反向守卫会查）。
 
-- **RelayKit**（`QuantumNous/new-api/relaykit`，**AGPL-3.0**）：结构化诊断的形状与两个严重级别、未知停止原因原样透传、usage 合并的「非零才覆盖」规则、golden 快照的组织方式。
-  - 落地处：usage 合并规则在 `src/wire/usage.js`（含上游没有的惰性拷贝与 `mergeUsageFrames`）。
-  - **为什么这是「只学规格」而不是「借用」**：规则本身是协议事实（「分片上报的计数要合并」不是任何人的表达），换个语言、换个数据结构重写不构成衍生；本仓没有引入它的任何源码、常量表、诊断码清单或数据结构（`relaykit/` 是 Go 模块，与本仓技术栈也不同），也没有采用它最重的那部分（`toolconv` 的 hosted-tool 全矩阵、`relayconvert` 的协议 IR）——那是聚合网关的业务面，不是账号级反代需要的。
-  - `src/wire/usage.js` 的头部注释里**故意不提**它的名字：`test/notices.test.js` 有一条反向守卫，任何登记在「借用的代码」里的文件都不许出现 `relaykit`，而这个文件不属于那一节。
-  - 若将来要真正复制它的代码，就得改成与 magpie 同样的台账行，并且**整仓都受 AGPL-3.0 传染**；本仓的选择是不复制。
-- **AstrLink `docs/`**（Apache-2.0）：粘性可审计、上游身份铁律、未计价不猜。
-- **V1ki/dsh-plugin-subscriptions**（MIT）：W4 的回放信封。
-  - 落地处：`src/wire/replay.js`。
-  - **为什么不登记成「借用」**：信封的形状（`{response:{kind,version,model},blocks}`）、校验项（种类、版本、模型、块数、逐块类型、签名只许出现在 `reasoning` 块上）**全部是宿主自己的约定**，我们是从 `@deepseek-ai/dsh-llm-deepseek` 与 `@deepseek-ai/dsh-llm-pi-ai` 这两个随宿主发布的适配器里读出来的（`pi-ai` 用 `kind:"pi-ai"`、`version:2`，我们照这个先例取了自己的 `kind`）。V1ki 那一份是 TypeScript 的 Antigravity 线，**没有一行进入本仓**——本仓不知道 Antigravity 的思考签名长什么样，也还没验过它。
-  - 它对这个工作包的真实贡献是**「签名不能像我们原来那样直接扔掉」这个判断**，以及「按 `kind` 分开命名空间」这个做法；两条都是设计，不是表达。
-- **RelayKit**（AGPL-3.0）：`continuation_state_lost` 这条诊断。
-  - 它把「上游给了续传态、而我们的块类型表达不了它」记成 **error 级**（`relayconvert/internal/toolconv/response.go`），这是本仓 W4 的立项理由：我们此前把 Anthropic 的 `signature_delta` 直接丢进注释里。
-  - 我们**没有**采用它的表达方式：本仓不设中央诊断码表，`replayState` 是宿主已有的通道，不需要「丢失」这个说法——能带就带，带不了就当没有（见 `src/wire/replay.js` 头部）。
+| 上游 | 落地点 | 学的是什么 |
+|---|---|---|
+| **RelayKit**（`QuantumNous/new-api/relaykit`，**AGPL-3.0**） | `src/wire/usage.js`、`src/wire/diagnostics.js` | ① usage 合并的「非零才覆盖」；② 结构化诊断的形状（`code` / `severity` / `path` / `from` / `to`）与两档严重性；③ 未知停止原因原样透传不伪造；④ golden 快照的组织方式；⑤ `continuation_state_lost` 这条诊断（W4 的立项理由） |
+| **AstrLink `docs/`**（Apache-2.0） | 文档与规则 | 粘性可审计、上游身份铁律、未计价不猜 |
+| **V1ki/dsh-plugin-subscriptions**（MIT） | `src/wire/replay.js` | 回放信封的**必要性判断**（「签名不能像我们原来那样直接扔掉」）与「按 `kind` 分开命名空间」 |
+
+- **为什么 RelayKit 只算「只学规格」**：规则本身大多是协议事实（「分片上报的计数要合并」不是任何人的表达），
+  换个语言、换个数据结构重写不构成衍生；本仓没有引入它的任何源码、常量表、诊断码清单或数据结构
+  （`relaykit/` 是 Go 模块，与本仓技术栈也不同），也没有采用它最重的那部分（`toolconv` 的 hosted-tool
+  全矩阵、`relayconvert` 的协议 IR）——那是聚合网关的业务面，不是账号级反代需要的。
+  本仓的 `src/wire/diagnostics.js` 里**没有 RelayKit 的诊断码清单**：我们用自己起的八个码，
+  一条一条对应自己真的会丢东西的地方。
+- **若将来要真正复制它的代码**，就得改成与 magpie 同样的「借用的代码」台账行，并且**整仓都受
+  AGPL-3.0 传染**；本仓的选择是不复制。
+- **V1ki 那一份是 TypeScript 的 Antigravity 线，没有一行进入本仓**——本仓不知道 Antigravity 的
+  思考签名长什么样，也还没验过它。信封的形状（`{response:{kind,version,model},blocks}`）与校验项
+  （种类、版本、模型、块数、逐块类型、签名只许出现在 `reasoning` 块上）**全部是宿主自己的约定**，
+  我们是从 `@deepseek-ai/dsh-llm-deepseek` 与 `@deepseek-ai/dsh-llm-pi-ai` 这两个随宿主发布的
+  适配器里读出来的（`pi-ai` 用 `kind:"pi-ai"`、`version:2`，我们照这个先例取了自己的 `kind`）。
+- **`continuation_state_lost` 的处置我们改了**：RelayKit 把它记成 error 级且用中央码表；本仓不设中央
+  码表，`replayState` 是宿主已有的通道——能带就带，带不了报一条自己的 `CONTINUATION_STATE_LOST`
+  （见 `src/wire/responses.js` 的收尾）。

@@ -513,7 +513,10 @@ export const minimaxFamily = {
       model,
       max_tokens: limit,
       system: toAnthropicSystem(system, messages),
-      messages: toAnthropicMessages(messages, { replay }),
+      messages: toAnthropicMessages(messages, {
+        replay,
+        onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+      }),
       stream: true,
       // 与客户端自己的 default_value: 'true' 一致。上游实测接受 adaptive，
       // 也接受 enabled+budget_tokens；两种都会回 thinking 块，而

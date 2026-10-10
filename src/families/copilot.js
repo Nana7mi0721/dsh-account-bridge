@@ -82,6 +82,7 @@ import {
 import { assertApiReply } from '../wire/assert-reply.js'
 import { translateChatStream } from '../wire/chat-completions.js'
 import { redact, sleep, tryJson } from '../util.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 
 const ROUTE = 'acct-copilot'
 const DISPLAY_NAME = 'GitHub Copilot'
@@ -418,6 +419,6 @@ export const copilotFamily = {
       const text = await reply.text().catch(() => '')
       throw copilotError(reply, text, 'copilot')
     }
-    yield* translateChatStream(reply, { signal })
+    yield* translateChatStream(reply, { signal, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
   },
 }

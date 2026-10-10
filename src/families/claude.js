@@ -285,7 +285,10 @@ export const claudeFamily = {
       model,
       max_tokens: limit,
       system: toAnthropicSystem(system, messages),
-      messages: toAnthropicMessages(messages, { replay }),
+      messages: toAnthropicMessages(messages, {
+        replay,
+        onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+      }),
       stream: true,
       // 会话身份与请求头里的 `x-claude-code-session-id` 是**同一个值**（见 requestHeaders）。
       ...(scoped ? { metadata: claudeMetadata(account, auth, scoped) } : {}),

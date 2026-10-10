@@ -26,6 +26,7 @@ import {
   turnOf,
 } from './affinity.js'
 import { SPENT_SHARE, decayUsage, rankCandidates, shareOf, usageNow } from './select.js'
+import { Diagnostics } from './wire/diagnostics.js'
 import { redact } from './util.js'
 
 /** 池装配的缓存时长：`owns()` 每次选模型都会跑，而装配要碰目录与账号存储。 */
@@ -41,6 +42,14 @@ const ALLOWANCE_TTL_MS = 5 * 60_000
 const ALLOWANCE_RETRY_MS = 60_000
 /** `#lastWhy` 的上限（只是给人看的诊断，不是状态）。 */
 const WHY_LIMIT = 1000
+/**
+ * 留几次请求的翻译账本。
+ *
+ * 只留最后一次是不够的：agent 一轮里有好几次请求，最后一次常常是**干净**的
+ * （回传工具结果那一轮），于是「你刚看见模型没看到你的图片，去查，它说『什么都没丢』」。
+ * 真机验收时就是这么被绊了一下的。
+ */
+const LOST_BOOKS_KEPT = 8
 
 /*
  * 换号窗口的三个上限（语义照 magpie `internal/gateway/fallback.go` 的
@@ -124,6 +133,8 @@ export class AccountBridgeAdapter {
   #health
   #families
   #log
+  /** 最近一次请求的翻译账本（W8）。给 `/pool lost` 看，不参与选号。 */
+  #lost = []
   #catalogs = new Map()
   #pools = new Map()
   /**
@@ -272,9 +283,70 @@ export class AccountBridgeAdapter {
   /** 直接实现 stream，便于 `prepareCall` 之外的调用方（测试）使用。 */
   stream(options) {
     const family = options.family ?? this.familyOf(options.provider)
+    // 一次请求一本账。诊断**不跨请求累积**：一个坏掉的流会把接下来十轮的日志
+    // 都染上它的味道，而那十轮其实什么都没丢。
+    const lost = new Diagnostics()
+    this.#lost.push({ at: Date.now(), family: family.id, book: lost })
+    if (this.#lost.length > LOST_BOOKS_KEPT) this.#lost.shift()
     // 包一层 `carryingFailures`：失败可能在消费到一半才发生，只有把 `yield*` 整个包住
     // 才接得到，接不到就等于让宿主的失败码停在 `UNKNOWN`（见 `src/failure.js`）。
-    return carryingFailures(this.#streamWithPool(family, options))
+    return carryingFailures(this.#logged(family, options, lost))
+  }
+
+  /**
+   * 把翻译账本记完再收尾。
+   *
+   * 放在 `finally` 里：调用方中途放弃（用户按了停止、宿主换了账号）时账本照样要落地，
+   * 那正是最需要知道「刚才丢了什么」的时刻。
+   *
+   * **日志那一行只是顺手**：桌面版里 `ctx.logger` 写到哪由宿主决定，headless 跑的时候
+   * 它连 stdout 都不落（真机验过：同一个 logger 说一句话，日志里一个字都没有）。
+   * 所以要看「到底丢了什么」，可靠的面是内存里那本账（`/pool lost` 与
+   * `POST /account-bridge/diagnostics`），不是日志。
+   */
+  async *#logged(family, options, lost) {
+    try {
+      yield* this.#streamWithPool(family, { ...options, onDiagnostic: (entry) => lost.report(entry) })
+    } finally {
+      const line = lost.describe()
+      if (line !== undefined) {
+        const write = lost.hasErrors ? this.#log?.warn : this.#log?.info
+        try {
+          write?.call(this.#log, 'account-bridge: %s %s', family.id, line)
+        } catch {
+          // 日志自己出错，与这一轮请求无关。
+        }
+      }
+    }
+  }
+
+  /**
+   * 最近几次请求翻译层丢掉了什么（W8）。
+   *
+   * **留一个环而不是只留最后一次**：agent 一轮里有好几次请求，最后一次常常是干净的
+   * （回传工具结果那一轮），只留最后一次等于「你刚看见模型没看到你的图片，去查，
+   * 结果它说『什么都没丢』」。所以这里报的是**最近一次真的丢了东西的**那一本。
+   *
+   * 返回的是**快照**：`entries` 与 `summary` 都是拷贝，调用方改不动池子的账。
+   */
+  diagnostics() {
+    const kept = this.#lost.map((row) => ({ at: row.at, family: row.family, book: row.book }))
+    const dirty = kept.filter((row) => row.book.size > 0)
+    const last = dirty.at(-1)
+    return {
+      /** 环里存了几次请求的账。 */
+      requests: kept.length,
+      /** 其中几次真的丢了东西。 */
+      lostRequests: dirty.length,
+      /** 最近一次「丢了东西」是什么时候（没有就 undefined）。 */
+      at: last?.at,
+      family: last?.family,
+      entries: last?.book.entries ?? [],
+      summary: last?.book.summary() ?? {},
+      hasErrors: last?.book.hasErrors ?? false,
+      dropped: last?.book.dropped ?? 0,
+      describe: last?.book.describe(),
+    }
   }
 
   // -------------------------------------------------------------- 池装配
@@ -707,6 +779,10 @@ export class AccountBridgeAdapter {
             signal: options.signal,
             // 回放只给第一个候选：签名是某个账号签的，换号之后再把它发出去是没验过的事。
             replay: this.#replay && index === 0,
+            // 翻译层的损失账本。**必须显式传**：这个对象是逐字段拼出来的，不是
+            // `...options` 展开的——少写这一行，翻译层照样会报告，而生产路径上没有人听，
+            // 那比不报告更糟（文档里那句「丢了会记下来」就成了假的）。
+            onDiagnostic: options.onDiagnostic,
           })
           [Symbol.asyncIterator]()
 

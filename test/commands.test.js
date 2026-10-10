@@ -459,3 +459,63 @@ test('every result is a plain {kind, text} the host can freeze', async () => {
     assert.ok(result.text.trim().length > 0)
   }
 })
+
+// ---------------------------------------------------------------- lost
+
+test('/pool lost says "nothing was lost" when the book is clean', async () => {
+  // 干净的时候也要给一句话。「空表格」读起来像功能没做，而「这一次什么都没丢」是个结论。
+  const adapter = {
+    ...fakeAdapter(),
+    diagnostics: () => ({ entries: [], hasErrors: false, dropped: 0, describe: undefined }),
+  }
+  const result = await run(makeCommand({ adapter }), 'lost')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /什么都没丢/)
+})
+
+test('/pool lost names each loss, its severity and where it happened', async () => {
+  const adapter = {
+    ...fakeAdapter(),
+    diagnostics: () => ({
+      entries: [
+        { code: 'IMAGE_WITHOUT_DATA', severity: 'error', phase: 'request', path: 'messages[0].content[1]', count: 2 },
+        { code: 'UNKNOWN_STOP_REASON', severity: 'warning', phase: 'stream', from: 'something_new', count: 1 },
+      ],
+      hasErrors: true,
+      dropped: 3,
+      describe: 'lost content: IMAGE_WITHOUT_DATA×2 UNKNOWN_STOP_REASON×1, +3 dropped',
+    }),
+  }
+  const result = await run(makeCommand({ adapter }), 'lost')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /有 `error` 级/)
+  assert.match(result.text, /messages\[0\]\.content\[1\]/)
+  assert.match(result.text, /模型没看到这张图/)
+  assert.match(result.text, /可能其实没说完/)
+  assert.match(result.text, /3\*\* 条因为超过上限被丢掉/)
+})
+
+test('/pool lost survives an adapter that does not implement diagnostics at all', async () => {
+  // 命令不能假设池子一定接上了账本——没接上时该说的是「什么都没丢」，
+  // 而不是 `Cannot read properties of undefined`。
+  const result = await run(makeCommand(), 'lost')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /什么都没丢/)
+  const alias = await run(makeCommand(), 'diagnostics')
+  assert.equal(alias.kind, 'success')
+})
+
+test('/pool lost says so when no request has gone through yet', async () => {
+  // 「还没走过请求」与「走过了但什么都没丢」是两件事：前者用户该去看配置，
+  // 后者用户该放心。把两者说成一句话，就是在最该给线索的时候给了一句空话。
+  const empty = { diagnostics: () => ({ requests: 0, lostRequests: 0, entries: [], summary: {}, hasErrors: false, dropped: 0 }) }
+  const result = await run(makeCommand({ adapter: empty }), 'lost')
+  assert.equal(result.kind, 'success')
+  assert.match(result.text, /还没有走过一次请求/)
+
+  const quiet = {
+    diagnostics: () => ({ requests: 4, lostRequests: 0, entries: [], summary: {}, hasErrors: false, dropped: 0 }),
+  }
+  const after = await run(makeCommand({ adapter: quiet }), 'lost')
+  assert.match(after.text, /最近 \*\*4\*\* 次请求\*\*什么都没丢\*\*/)
+})

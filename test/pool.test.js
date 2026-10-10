@@ -408,3 +408,162 @@ test('replay reaches the first candidate only: no account is handed a signature 
   await run(false)
   assert.deepEqual(seen, [false, false], 'with replay off nobody replays, not even the first')
 })
+
+test('what the translator dropped is collected, said once, and readable afterwards', async () => {
+  // W8 的承诺是「翻译层不再静默丢东西」。翻译层自己会报告，但**得有一个人在听**——
+  // 池子是那个人：它把一次请求的损失收进一本账，说完一句就完事，并留给 `/pool lost`。
+  const said = []
+  const log = { info: (...a) => said.push(a.join(' ')), warn: (...a) => said.push(a.join(' ')), error() {}, debug() {} }
+  const quiet = { on: false }
+  const family = makeFamily({
+    async *stream(ctx, options) {
+      if (!quiet.on) {
+        options.onDiagnostic?.({ code: 'IMAGE_WITHOUT_DATA', severity: 'error', phase: 'request', path: 'messages[0].content[1]' })
+        options.onDiagnostic?.({ code: 'IMAGE_WITHOUT_DATA', severity: 'error', phase: 'request', path: 'messages[0].content[1]' })
+        options.onDiagnostic?.({ code: 'UNKNOWN_STOP_REASON', severity: 'warning', phase: 'stream', from: 'something_new' })
+      }
+      yield* family.impl(options)
+    },
+  })
+  const credentials = createMemoryCredentials()
+  const store = new AccountStore(credentials, silent)
+  await store.write('codex-1', {
+    id: 'codex-1',
+    family: 'codex',
+    label: 'codex-1',
+    auth: { access: 't', refresh: 'r', expiresAt: Date.now() + 3_600_000 },
+  })
+  const adapter = new AccountBridgeAdapter({
+    ctx: { fetch: async () => {}, log, config: {} },
+    store,
+    health: new CooldownTable(),
+    families: [family],
+    log,
+  })
+  const drain = async () => {
+    for await (const _ of adapter.stream({ provider: 'acct-codex', model: 'm1', messages: [{ id: 'u1', role: 'user' }] })) {
+      // 读干净就行
+    }
+  }
+
+  await drain()
+  const book = adapter.diagnostics()
+  // 同一个 code 同一个位置只说一次，次数记在 count 上——一个坏流能刷出上万条同样的。
+  assert.equal(book.entries.length, 2)
+  assert.equal(book.entries[0].count, 2)
+  assert.equal(book.hasErrors, true, 'a picture the model never saw is not a cosmetic loss')
+  assert.equal(book.describe, 'lost content: IMAGE_WITHOUT_DATA×2 UNKNOWN_STOP_REASON×1')
+  // 说的话正好一句，而且用 warn（有 error 级）。
+  assert.equal(said.length, 1)
+  assert.match(said[0], /lost content: IMAGE_WITHOUT_DATA×2/)
+
+  // 第二趟请求从一本**干净**的账开始：上一个坏流不该把接下来的日志都染上味道。
+  said.length = 0
+  quiet.on = true
+  await drain()
+  assert.deepEqual(said, [], 'nothing lost means nothing said')
+  // 但账本要记得刚才那次——用户是**事后**来问「模型为什么没看到我的图片」的，
+  // 那时候最后那次请求多半已经是干净的了（回传工具结果那一轮）。
+  const after = adapter.diagnostics()
+  assert.equal(after.requests, 2, 'the ring keeps every request it saw')
+  assert.equal(after.lostRequests, 1, 'only one of them lost anything')
+  assert.match(after.describe, /IMAGE_WITHOUT_DATA×2/, 'the loss from the earlier request is still there')
+})
+
+test('a caller who walks away still gets the loss recorded', async () => {
+  // 用户按了停止、宿主换了账号——那正是最需要知道「刚才丢了什么」的时刻。
+  const log = { info() {}, warn() {}, error() {}, debug() {} }
+  let reported = 0
+  const family = makeFamily({
+    async *stream(ctx, options) {
+      options.onDiagnostic?.({ code: 'UNRENDERED_BLOCK_TYPE', severity: 'warning', phase: 'stream' })
+      reported += 1
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'first' }
+      yield { type: 'text-delta', index: 0, text: 'second' }
+    },
+  })
+  const credentials = createMemoryCredentials()
+  const store = new AccountStore(credentials, silent)
+  await store.write('codex-1', {
+    id: 'codex-1',
+    family: 'codex',
+    label: 'codex-1',
+    auth: { access: 't', refresh: 'r', expiresAt: Date.now() + 3_600_000 },
+  })
+  const adapter = new AccountBridgeAdapter({
+    ctx: { fetch: async () => {}, log, config: {} },
+    store,
+    health: new CooldownTable(),
+    families: [family],
+    log,
+  })
+  const iterator = adapter
+    .stream({ provider: 'acct-codex', model: 'm1', messages: [{ id: 'u1', role: 'user' }] })
+    [Symbol.asyncIterator]()
+  await iterator.next()
+  await iterator.next()
+  await iterator.return?.()
+
+  assert.equal(reported, 1)
+  assert.equal(adapter.diagnostics().entries.length, 1, 'abandoning the stream must not lose the book')
+})
+
+test('the loss book remembers the last few requests, newest loss first', async () => {
+  // 只留最后一次是不够的：agent 一轮里有好几次请求，最后一次常常是干净的。
+  // 那时候用户来问「模型为什么没看到我的图片」，只留最后一次的账本会答「什么都没丢」。
+  const log = { info() {}, warn() {}, error() {}, debug() {} }
+  let losing = true
+  const family = makeFamily({
+    async *stream(ctx, options) {
+      if (losing) options.onDiagnostic?.({ code: 'IMAGE_WITHOUT_DATA', severity: 'error', phase: 'request' })
+      yield { type: 'block-start', index: 0, blockType: 'text' }
+      yield { type: 'text-delta', index: 0, text: 'ok' }
+    },
+  })
+  const store = new AccountStore(createMemoryCredentials(), silent)
+  await store.write('codex-1', {
+    id: 'codex-1',
+    family: 'codex',
+    label: 'codex-1',
+    auth: { access: 't', refresh: 'r', expiresAt: Date.now() + 3_600_000 },
+  })
+  const adapter = new AccountBridgeAdapter({
+    ctx: { fetch: async () => {}, log, config: {} },
+    store,
+    health: new CooldownTable(),
+    families: [family],
+    log,
+  })
+  const drain = async () => {
+    for await (const _ of adapter.stream({ provider: 'acct-codex', model: 'm1', messages: [{ id: 'u1', role: 'user' }] })) {
+      // 读干净就行
+    }
+  }
+
+  await drain()
+  losing = false
+  for (let i = 0; i < 5; i += 1) await drain()
+
+  const book = adapter.diagnostics()
+  assert.equal(book.requests, 6)
+  assert.equal(book.lostRequests, 1, 'the one bad request is the one it reports')
+  assert.equal(book.entries[0].code, 'IMAGE_WITHOUT_DATA')
+  assert.equal(book.hasErrors, true)
+  assert.equal(typeof book.at, 'number', 'it says when the loss happened')
+
+  // 环是有界的：再走三次干净请求，那次坏的就掉出去了。
+  for (let i = 0; i < 3; i += 1) await drain()
+  const aged = adapter.diagnostics()
+  assert.equal(aged.requests, 8, 'the ring is bounded')
+  assert.equal(aged.lostRequests, 0, 'the old loss has aged out')
+  assert.deepEqual(aged.entries, [])
+
+  // 新的坏请求一来，报的就是新的那一次。
+  losing = true
+  await drain()
+  const fresh = adapter.diagnostics()
+  assert.equal(fresh.requests, 8)
+  assert.equal(fresh.lostRequests, 1)
+  assert.equal(fresh.entries[0].code, 'IMAGE_WITHOUT_DATA')
+})

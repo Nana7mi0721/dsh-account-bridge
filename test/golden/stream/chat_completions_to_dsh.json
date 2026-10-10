@@ -1,0 +1,88 @@
+[
+  {
+    "blockType": "reasoning",
+    "index": 0,
+    "type": "block-start"
+  },
+  {
+    "index": 0,
+    "text": "Thinking about it",
+    "type": "reasoning-delta"
+  },
+  {
+    "blockType": "text",
+    "index": 1,
+    "type": "block-start"
+  },
+  {
+    "index": 1,
+    "text": "It is ",
+    "type": "text-delta"
+  },
+  {
+    "index": 1,
+    "text": "a PNG.",
+    "type": "text-delta"
+  },
+  {
+    "blockType": "tool-call",
+    "index": 2,
+    "type": "block-start"
+  },
+  {
+    "argumentsDelta": "",
+    "id": "call_golden_1",
+    "index": 2,
+    "name": "read_file",
+    "type": "tool-call-delta"
+  },
+  {
+    "argumentsDelta": "{\"path\"",
+    "index": 2,
+    "type": "tool-call-delta"
+  },
+  {
+    "argumentsDelta": ":\"a.png\"}",
+    "index": 2,
+    "type": "tool-call-delta"
+  },
+  {
+    "block": {
+      "text": "Thinking about it",
+      "type": "reasoning"
+    },
+    "index": 0,
+    "type": "block-end"
+  },
+  {
+    "block": {
+      "text": "It is a PNG.",
+      "type": "text"
+    },
+    "index": 1,
+    "type": "block-end"
+  },
+  {
+    "block": {
+      "arguments": "{\"path\":\"a.png\"}",
+      "id": "call_golden_1",
+      "name": "read_file",
+      "type": "tool-call"
+    },
+    "index": 2,
+    "type": "block-end"
+  },
+  {
+    "type": "usage",
+    "usage": {
+      "inputTokens": 1200,
+      "outputTokens": 42
+    }
+  },
+  {
+    "reason": {
+      "kind": "tool-calls"
+    },
+    "type": "finish"
+  }
+]

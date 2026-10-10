@@ -436,7 +436,11 @@ export const genericFamily = {
       const body = {
         model,
         max_tokens: limit,
-        messages: toAnthropicMessages(messages, { cache: false, replay }),
+        messages: toAnthropicMessages(messages, {
+          cache: false,
+          replay,
+          onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+        }),
         stream: true,
         ...(systemBlocks.length > 0 ? { system: systemBlocks } : {}),
         ...(tools?.length ? { tools: toAnthropicTools(tools), tool_choice: { type: 'auto' } } : {}),
@@ -457,7 +461,8 @@ export const genericFamily = {
       return
     }
 
-    const chatMessages = toChatMessages(messages)
+    const onDiagnostic = diagnosticReporter(ctx, options.onDiagnostic)
+    const chatMessages = toChatMessages(messages, { onDiagnostic })
     const systemText = toChatSystem(system, messages)
     const body = {
       model,
@@ -477,7 +482,7 @@ export const genericFamily = {
     // 200 也可能是网页（Cloudflare 挑战页、登录页、空 body）：先确认它像 API 回复。
     const reply = await assertApiReply(response, { who: 'generic' })
     if (!reply.ok) throw httpError(reply, await reply.text().catch(() => ''), 'generic')
-    yield* translateChatStream(reply, { signal })
+    yield* translateChatStream(reply, { signal, onDiagnostic })
   },
 }
 

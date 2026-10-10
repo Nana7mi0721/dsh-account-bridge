@@ -360,7 +360,7 @@ test('a stream round-trips: what the translator stored is what the next turn sen
 // ---------------------------------------------------------------------------
 
 /** 一条 Responses 风格的事件流：思考项带加密内容，然后一段正文。 */
-function responsesTurn({ encrypted = 'enc-blob', stopReason = 'completed', summary = 'thinking' } = {}) {
+function responsesTurn({ encrypted = 'enc-blob', stopReason = 'completed', summary = 'thinking', streamSummary = true } = {}) {
   // `null` = 这一项干脆不要那个字段（用默认值的话 `undefined` 会被解构成默认值）。
   const reasoningItem = {
     type: 'reasoning',
@@ -370,7 +370,9 @@ function responsesTurn({ encrypted = 'enc-blob', stopReason = 'completed', summa
   }
   const events = [
     { event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: 0, item: { type: 'reasoning', id: 'rs_1' } } },
-    { event: 'response.reasoning_summary_text.delta', data: { type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'rs_1', delta: 'thin' } },
+    ...(streamSummary
+      ? [{ event: 'response.reasoning_summary_text.delta', data: { type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'rs_1', delta: 'thin' } }]
+      : []),
     { event: 'response.output_item.done', data: { type: 'response.output_item.done', output_index: 0, item: reasoningItem } },
     { event: 'response.output_item.added', data: { type: 'response.output_item.added', output_index: 1, item: { type: 'message', id: 'msg_1' } } },
     { event: 'response.output_text.delta', data: { type: 'response.output_text.delta', output_index: 1, item_id: 'msg_1', delta: 'hi' } },
@@ -398,14 +400,38 @@ test('replay off means the default request and the default stream are untouched'
   assert.equal(finishOf(withEncrypted).replayState, undefined)
 })
 
-test('a reasoning item with no text is dropped by default and kept when replaying', async () => {
-  const onlyEncrypted = responsesTurn({ encrypted: 'enc-blob', summary: null })
+test('a reasoning item that carries no summary keeps what was streamed', async () => {
+  // 真机上见过：`output_item.done` 的 reasoning 项不带 summary，而收尾块是权威的。
+  // 没有这条兜底时，一段刚才已经显示过的思考会在收尾被换成空块。
+  const off = await collect(translateResponsesStream(responsesTurn({ encrypted: 'enc-blob', summary: null }), { model: 'm' }))
+  assert.deepEqual(off.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
+    { type: 'reasoning', text: 'thin' },
+    { type: 'text', text: 'hi' },
+  ])
+
+  const on = await collect(translateResponsesStream(responsesTurn({ encrypted: 'enc-blob', summary: null }), { model: 'm', replay: true }))
+  assert.deepEqual(on.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
+    { type: 'reasoning', text: 'thin' },
+    { type: 'text', text: 'hi' },
+  ])
+})
+
+test('a reasoning item with no text at all is dropped by default and kept when replaying', async () => {
+  // 这是上一条的对照：**一个字都没流过**、`.done` 里也没有 summary，
+  // 这时默认丢掉（界面上不该多出一个空的思考块），开着回放才留一个空块
+  // 当载体——那是这一轮唯一能把加密状态带回去的东西。
+  const onlyEncrypted = responsesTurn({ encrypted: 'enc-blob', summary: null, streamSummary: false })
   const off = await collect(translateResponsesStream(onlyEncrypted, { model: 'm' }))
   assert.deepEqual(off.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
     { type: 'text', text: 'hi' },
   ])
 
-  const on = await collect(translateResponsesStream(responsesTurn({ encrypted: 'enc-blob', summary: null }), { model: 'm', replay: true }))
+  const on = await collect(
+    translateResponsesStream(responsesTurn({ encrypted: 'enc-blob', summary: null, streamSummary: false }), {
+      model: 'm',
+      replay: true,
+    }),
+  )
   assert.deepEqual(on.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
     { type: 'reasoning', text: '' },
     { type: 'text', text: 'hi' },

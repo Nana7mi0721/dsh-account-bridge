@@ -20,6 +20,8 @@
 
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
+import { diagnosticReporter } from './diagnostics.js'
+import { BENIGN_RESPONSE_EVENTS, RENDERED_ITEM_TYPES } from './responses.js'
 import { tryJson } from '../util.js'
 
 /** 订阅口径（默认）。 */
@@ -136,12 +138,17 @@ export function grokHeaders({ access, clientVersion, cli, json = false, extra = 
  *   —— 真机确认 xAI 是「item.id 关联流内事件、call_id 关联工具结果」（两族共通坑里
  *   copilot 恰好相反，两份实现不能共用 id 策略）。
  */
-export function toResponsesInput(messages) {
+export function toResponsesInput(messages, { onDiagnostic } = {}) {
   const input = []
-  for (const message of messages ?? []) {
+  const report = diagnosticReporter(undefined, onDiagnostic)
+  for (const [msgIndex, message] of (messages ?? []).entries()) {
     if (message?.role === 'system') continue
     if (message.role === 'user') {
-      input.push({ type: 'message', role: 'user', content: inputContent(message.content) })
+      input.push({
+        type: 'message',
+        role: 'user',
+        content: inputContent(message.content, report, `messages[${msgIndex}].content`),
+      })
       continue
     }
     if (message.role === 'assistant') {
@@ -156,6 +163,19 @@ export function toResponsesInput(messages) {
           call_id: block.id,
           name: block.name,
           arguments: typeof block.arguments === 'string' ? block.arguments : JSON.stringify(block.arguments ?? {}),
+        })
+      }
+      for (const [index, block] of (Array.isArray(message.content) ? message.content : []).entries()) {
+        if (block?.type === 'text' || block?.type === 'tool-call') continue
+        // `reasoning` 这条线从来不回传（xAI 不收纯文本思考项），属有意为之，不报。
+        if (block?.type === 'reasoning') continue
+        report?.({
+          code: 'UNKNOWN_BLOCK_TYPE',
+          severity: 'error',
+          phase: 'request',
+          path: `messages[${msgIndex}].content[${index}]`,
+          message: `grok: unknown content block type "${block?.type}", dropped from the request`,
+          from: block?.type,
         })
       }
       continue
@@ -201,11 +221,11 @@ export function toResponsesTools(tools) {
  *   —— 那个头在八个参考仓库里零命中，缓存亲和走 body，会话粘性交给账号池。
  */
 export function buildGrokBody(options = {}) {
-  const { model, messages, system, tools, effort, maxTokens, promptCacheKey } = options
+  const { model, messages, system, tools, effort, maxTokens, promptCacheKey, onDiagnostic } = options
   const toolList = toResponsesTools(tools)
   const body = {
     model,
-    input: toResponsesInput(messages),
+    input: toResponsesInput(messages, { onDiagnostic }),
     store: false,
     stream: true,
     include: ['reasoning.encrypted_content'],
@@ -244,7 +264,8 @@ function blockTypeOf(itemType) {
  * @returns {AsyncGenerator<object>}
  */
 export async function* translateGrokStream(response, options = {}) {
-  const { signal, onEvent } = options
+  const { signal, onEvent, onDiagnostic } = options
+  const report = diagnosticReporter(undefined, onDiagnostic)
   /** @type {Map<string, object>} 打开中的块，键是归一化后的 index */
   const slots = new Map()
   /** 已经进入 `slots` 的键（含已结束的），保证 `block-start` 只发一次。 */
@@ -321,6 +342,17 @@ export async function* translateGrokStream(response, options = {}) {
     switch (type) {
       case 'response.output_item.added': {
         const item = payload.item ?? {}
+        // 服务端工具（`web_search_call`、`x_search_call`…）会被当成一段文本念给用户听。
+        if (!RENDERED_ITEM_TYPES.has(item.type)) {
+          report?.({
+            code: 'UNRENDERED_ITEM_TYPE',
+            severity: 'warning',
+            phase: 'stream',
+            message: `grok: output item type "${item.type}" has no DSH equivalent, opened as a text block`,
+            from: item.type,
+            to: 'text',
+          })
+        }
         const { slot, fresh } = slotFor(payload, blockTypeOf(item.type))
         if (item.id) slot.itemId = item.id
         if (item.call_id) slot.callId = item.call_id
@@ -506,7 +538,17 @@ export async function* translateGrokStream(response, options = {}) {
         break
       }
       default:
-        // `response.created` / `response.in_progress` / `*_part.added|done` 都不带新内容。
+        // `response.created` / `response.in_progress` / `*_part.added|done` 都不带新内容，
+        // 安静放行；这个名单之外的才是「上游说了句我们不认识的话」。
+        if (typeof type === 'string' && type.length > 0 && !BENIGN_RESPONSE_EVENTS.has(type)) {
+          report?.({
+            code: 'UNKNOWN_STREAM_EVENT',
+            severity: 'warning',
+            phase: 'stream',
+            message: `grok: unknown stream event "${type}", ignored`,
+            from: type,
+          })
+        }
         break
     }
   }
@@ -634,15 +676,25 @@ function reasoningTextOf(item) {
 }
 
 /** 用户消息的内容数组：文本 + 图片（能识别的转 data URL，否则降级为文字占位）。 */
-function inputContent(content) {
+function inputContent(content, report, path = 'content') {
   const out = []
-  for (const block of Array.isArray(content) ? content : []) {
+  for (const [index, block] of (Array.isArray(content) ? content : []).entries()) {
     if (block?.type === 'text' && typeof block.text === 'string') {
       out.push({ type: 'input_text', text: block.text })
       continue
     }
     if (block?.type === 'image') {
       const url = imageDataUrl(block)
+      if (!url) {
+        report?.({
+          code: 'IMAGE_WITHOUT_DATA',
+          severity: 'error',
+          phase: 'request',
+          path: `${path}[${index}]`,
+          message: 'grok: an image block has no usable data, so the model will not see it',
+          from: block.mediaType ?? block.mimeType ?? block.contentType,
+        })
+      }
       out.push(
         url ? { type: 'input_image', image_url: url } : { type: 'input_text', text: '[image omitted: unsupported encoding]' },
       )
@@ -650,7 +702,16 @@ function inputContent(content) {
     }
     if (block?.type === 'file') {
       out.push({ type: 'input_text', text: `[file omitted: ${block.name ?? 'attachment'}]` })
+      continue
     }
+    report?.({
+      code: 'UNKNOWN_BLOCK_TYPE',
+      severity: 'error',
+      phase: 'request',
+      path: `${path}[${index}]`,
+      message: `grok: unknown content block type "${block?.type}", dropped from the request`,
+      from: block?.type,
+    })
   }
   if (out.length === 0) out.push({ type: 'input_text', text: '' })
   return out

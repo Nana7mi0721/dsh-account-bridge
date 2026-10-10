@@ -193,6 +193,31 @@ test('reasoning and text land in separate blocks with their own types', async ()
   assert.equal(chunks.filter((chunk) => chunk.type === 'reasoning-delta').length, 1)
 })
 
+test('a reasoning item that arrives without its summary still keeps the streamed text', async () => {
+  // 真机上见过：`output_item.done` 的 reasoning 项不带 summary。收尾块是权威的，
+  // 所以没有这条兜底时，一段刚才已经显示过的思考会在收尾被换成空块。
+  // 这个缺陷是 golden 快照第一次生成时照出来的。
+  const chunks = await collect([
+    { type: 'response.output_item.added', output_index: 0, item: { id: 'rs_0', type: 'reasoning' } },
+    { type: 'response.reasoning_summary_text.delta', output_index: 0, item_id: 'rs_0', delta: 'thinking…' },
+    { type: 'response.output_item.done', output_index: 0, item: { id: 'rs_0', type: 'reasoning' } },
+  ])
+  assert.deepEqual(chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
+    { type: 'reasoning', text: 'thinking…' },
+  ])
+})
+
+test('a message item that arrives without its content keeps the streamed text too', async () => {
+  const chunks = await collect([
+    { type: 'response.output_item.added', output_index: 0, item: { id: 'msg_0', type: 'message' } },
+    { type: 'response.output_text.delta', output_index: 0, item_id: 'msg_0', delta: 'answer' },
+    { type: 'response.output_item.done', output_index: 0, item: { id: 'msg_0', type: 'message', content: [] } },
+  ])
+  assert.deepEqual(chunks.filter((chunk) => chunk.type === 'block-end').map((chunk) => chunk.block), [
+    { type: 'text', text: 'answer' },
+  ])
+})
+
 test('a tool call delta carries the call id, and the block end carries the full arguments', async () => {
   const chunks = await collect([
     { type: 'response.output_item.added', output_index: 0, item: { id: 'fc_0', type: 'function_call', name: 'read_file' } },

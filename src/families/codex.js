@@ -24,6 +24,7 @@ import { assertApiReply } from '../wire/assert-reply.js'
 import { httpError } from '../wire/http-error.js'
 import { toResponsesInput, toResponsesTools, translateResponsesStream } from '../wire/responses.js'
 import { resolveCliVersion } from '../cli-version.js'
+import { diagnosticReporter } from '../wire/diagnostics.js'
 import { accountScopedSession } from '../wire/identity.js'
 import { decodeJwtPayload, firstPositiveNumber, randomId, tryJson, withSource } from '../util.js'
 
@@ -284,7 +285,10 @@ export const codexFamily = {
 
   async *stream(ctx, options) {
     const { payload, model, messages, tools, effort, signal, account, session, replay } = options
-    const { instructions, input } = toResponsesInput(messages, { replay })
+    const { instructions, input } = toResponsesInput(messages, {
+      replay,
+      onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic),
+    })
     // 缓存亲和键：**按账号派生**，与身份命名空间同一套派生（见 wire/identity.js）。
     // 不发裸会话 id —— 那会让上游看到「同一段对话从两个安装打过来」。
     const cacheKey = scopeCacheKey(account, session)
@@ -320,7 +324,7 @@ export const codexFamily = {
       const text = await reply.text().catch(() => '')
       throw httpError(reply, text, 'codex')
     }
-    yield* translateResponsesStream(reply, { signal, model, replay })
+    yield* translateResponsesStream(reply, { signal, model, replay, onDiagnostic: diagnosticReporter(ctx, options.onDiagnostic) })
   },
 }
 
