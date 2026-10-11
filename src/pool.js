@@ -53,6 +53,14 @@ const WHY_LIMIT = 1000
 const LOST_BOOKS_KEPT = 8
 
 /**
+ * 记住几张图片的 base64。
+ *
+ * 同一张图会随着历史被反复回放（每一轮都要重发一遍），读盘一次就够。
+ * 上限只是防一份长对话把所有图都攒在内存里（一张 4 MB 的图 base64 之后是 5.3 MB）。
+ */
+const IMAGES_KEPT = 16
+
+/**
  * 一个账号在闸门里的身份：`<族>/<账号>`。
  *
  * **不是模型**：限额是账号级的（同一个账号的两个模型共用一份额度），这和冷却表
@@ -147,6 +155,8 @@ export class AccountBridgeAdapter {
   #log
   /** 最近一次请求的翻译账本（W8）。给 `/pool lost` 看，不参与选号。 */
   #lost = []
+  /** `attachmentId` → `{ mediaType, data }`（base64），见 `#withImageData`。 */
+  #images = new Map()
   #catalogs = new Map()
   #pools = new Map()
   /**
@@ -344,9 +354,101 @@ export class AccountBridgeAdapter {
    * 所以要看「到底丢了什么」，可靠的面是内存里那本账（`/pool lost` 与
    * `POST /account-bridge/diagnostics`），不是日志。
    */
+  /**
+   * 把宿主交来的图片引用换成上游要的 base64。
+   *
+   * 宿主正典的图片块是 `{ type: 'image', attachment: { attachmentId, mediaType, … } }`
+   * ——`ImageBlock` 的定义里**没有** `data`（`AssistantMessage.source` 那种形状同源，
+   * 都在 `dsh-llm` 的类型里），字节存在附件库里，由宿主的 `attachments` 服务保管。
+   * 十二个翻译层都是按 `{ type: 'image', mediaType, data }` 写的，所以**换引用这件事
+   * 在进翻译层之前做一次**，而不是让每一层各自去解（也没有哪一层拿得到 ctx）。
+   *
+   * 读不出来（没有 `attachments` 服务、附件已失效）时**原样留下**那个块：
+   * 翻译层会照旧报 `IMAGE_WITHOUT_DATA`，调用方看得见「这张图没发出去」。
+   * 悄悄把图吞掉才是真正不能接受的。
+   */
+  async #withImageData(options, report) {
+    const messages = options?.messages
+    if (!Array.isArray(messages)) return options
+    const wanted = []
+    for (const [index, message] of messages.entries()) {
+      if (!Array.isArray(message?.content)) continue
+      for (const [blockIndex, block] of message.content.entries()) {
+        if (block?.type !== 'image' || typeof block.data === 'string') continue
+        if (block.attachment?.attachmentId === undefined) continue
+        wanted.push({ at: `${index}:${blockIndex}`, path: `messages[${index}].content[${blockIndex}]`, ref: block.attachment })
+      }
+    }
+    if (wanted.length === 0) return options
+    let attachments
+    try {
+      attachments = this.#ctx?.get?.('attachments')
+    } catch {
+      // 没有这个服务（精简的宿主装配）就当它不存在，下面照旧原样留下图片块。
+      attachments = undefined
+    }
+    if (attachments === undefined) {
+      report?.({
+        code: 'IMAGE_REF_UNRESOLVED',
+        severity: 'error',
+        phase: 'request',
+        path: wanted[0].path,
+        message: 'an image block carries an attachment reference but there is no attachments service to read it from',
+        from: 'attachment',
+      })
+      return options
+    }
+
+    const swap = new Map()
+    for (const { at, path, ref } of wanted) {
+      const id = String(ref.attachmentId)
+      let ready = this.#images.get(id)
+      if (ready === undefined) {
+        try {
+          const version = await attachments.readImage(ref, options.signal)
+          ready = {
+            mediaType: version?.ref?.mediaType ?? ref.mediaType,
+            data: Buffer.from(version.data).toString('base64'),
+          }
+          this.#images.set(id, ready)
+          if (this.#images.size > IMAGES_KEPT) this.#images.delete(this.#images.keys().next().value)
+        } catch (error) {
+          // 一次没读到不是失败：留个印子，让翻译层照旧报「这张图没发出去」。
+          this.#log?.warn?.('account-bridge: 读不出附件 %s：%s', id, error?.message ?? error)
+          report?.({
+            code: 'IMAGE_READ_FAILED',
+            severity: 'error',
+            phase: 'request',
+            path,
+            message: `an image block could not be read from the attachment store: ${error?.code ?? ''} ${error?.message ?? error}`.trim(),
+            from: id,
+          })
+        }
+      }
+      if (ready !== undefined) swap.set(at, ready)
+    }
+    if (swap.size === 0) return options
+
+    return {
+      ...options,
+      messages: messages.map((message, index) =>
+        Array.isArray(message?.content)
+          ? {
+              ...message,
+              content: message.content.map((block, blockIndex) => {
+                const ready = swap.get(`${index}:${blockIndex}`)
+                return ready === undefined ? block : { type: 'image', mediaType: ready.mediaType, data: ready.data }
+              }),
+            }
+          : message,
+      ),
+    }
+  }
+
   async *#logged(family, options, lost) {
     try {
-      yield* this.#streamWithPool(family, { ...options, onDiagnostic: (entry) => lost.report(entry) })
+      const prepared = await this.#withImageData(options, (entry) => lost.report(entry))
+      yield* this.#streamWithPool(family, { ...prepared, onDiagnostic: (entry) => lost.report(entry) })
     } finally {
       const line = lost.describe()
       if (line !== undefined) {

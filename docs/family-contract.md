@@ -295,6 +295,35 @@ yield* translateAnthropicStream(response, { signal })
 **不知道的值宁可保守也不要编。** 上下文窗口低估只是提前压缩，高估会把超长请求送上去
 被拒、白烧一次额度（`agy` 族就是这么处理的，见它的注释）。
 
+**别把目录里读到的元数据丢掉。** 上游的 `/models` 里常常带着真正的模态与窗口
+（`architecture.input_modalities`、`context_length`），而 `resolveModel(provider, model)` 只拿到
+一个**模型名**。宿主要用它决定「这张图要不要换成一句占位文字」——`resolveModel` 回
+`inputModalities: ['text']` 时，宿主会在请求到达族之前把图片块换成
+`[image omitted because this model accepts text only; attachment sha256:…]`，
+族里再怎么写图片翻译都发不出去。所以：`listModels()` 见到什么就在模块级记一份
+（`src/families/generic.js` 的 `catalogMemory` 是现成模板，且**声明式目录不许覆盖目录里见过的真元数据**），
+`resolveModel` 从记忆里取，取不到才回保守默认值。
+
+### 5.4 宿主交来的消息：图片是引用，不是字节
+
+宿主交给适配器的图片块是
+
+```js
+{ type: 'image', attachment: { attachmentId: 'sha256:…', mediaType, bytes, width, height, name? } }
+```
+
+**没有 `data`**。翻译层（`src/wire/*.js`）都按 `{ type: 'image', mediaType, data }` 写，所以池子
+在进翻译层之前统一解引用一次（`src/pool.js` 的 `#withImageData`，读不到就报
+`IMAGE_REF_UNRESOLVED` / `IMAGE_READ_FAILED` 并**原样留下那个块**，不吞）。族**不用自己处理这件事**，
+但要知道两点：
+
+- 要宣明 `inputModalities` 含 `image`，否则图根本到不了这里（见上一节）。
+- 拿宿主服务的唯一入口是 `ctx.get(name)`（`ctx` 就是 `src/index.js` 的 `familyContext`，
+  它的 `get` 转到 `serviceOf(ctx, name)`）。**`familyContext` 曾经没有 `get`**，
+  于是 `ctx.get?.('attachments')` 恒为 undefined、每张图都被静默丢掉——加新服务时先确认这条路通。
+- 助手轮的消息带 `source: { kind: 'model', provider, model }`（回放态就挂在它上面）；
+  缺了宿主会在 `source.replayState` 上抛。
+
 ---
 
 ## 6. 失败归类
@@ -383,14 +412,27 @@ node test/e2e/harness.mjs --quiet # 安静模式
 - **注册与目录**：`llm.listProviders()` 里有这条 route、`listModels()` 不为空、
   `resolveModelInfo()` 的 `contextWindow` 是正整数、只出图的模型没进选择器；
 - **请求形状**：发出去的 URL / 头 / body 关键字段——尤其是伪装身份的那几个头，
-  少一个就是静默失效（`mock-whoami` 这类模型可以把它回显出来给你断言）；
+  少一个就是静默失效。假上游会把**收到的每一笔请求原样记下来**（`GET /__requests`，
+  只留最近 50 笔），所以探针可以这样问自己那一笔：
+  `trace(model, marker)` 会先 `DELETE /__requests`、发一次带唯一标记的请求、再按标记找回记录，
+  断言 body 的确切形状（`test/e2e/probe/index.js` 里两条「请求形状」检查就是模板）。
+  想让一笔请求**必然**走某条方言，用只挂在那条方言目录里的模型（`mock-openai-only` /
+  `mock-anthropic-only`）——池子是按目录过滤账号的；
 - **凭据不泄漏**：`/account-bridge/state` 的响应里**绝不该**出现 `auth.access` / `auth.refresh` /
   `auth.apiKey` 的值；
 - **失败归类**：401 → `AUTH`、429 + 额度词 → `ACCOUNT_QUOTA`、429 + 限流词 → `RATE_LIMIT`
   且 `providerRetryAfterMs` 有值；
 - **chunk 序列**：`block-start` → delta → `block-end` → `usage` → `finish`，且
   `finish.reason.kind` 只在三个合法值里；
-- **空回答抛 `EMPTY_RESPONSE`**，以及**失败那次的思考没有泄漏给调用方**。
+- **空回答抛 `EMPTY_RESPONSE`**，以及**失败那次的思考没有泄漏给调用方**；
+- **「翻译回显」**（替代已删掉的 golden 快照）：让假上游回**脚本化的流**，断言宿主最终看见的
+  chunk 序列与元数据。已经这样守住的七条：工具调用拼成一个 JSON 字符串且收尾是 `tool-calls`、
+  后到的零值不擦掉已读到的用量、截断归 `max-tokens`、思考签名一个字符不丢、
+  默认不回放上一轮的签名、两种方言的请求形状。新写翻译层时，照这个套路给**你新增的**
+  那种帧补一条——`mock-upstream.mjs` 里 `chatToolCallChunks()` / `anthropicSignedThinkingEvents()`
+  这些脚本化流就是模板。
+- **诊断账本**：翻译层丢了东西时，`GET /account-bridge/diagnostics` 里要看得到
+  （探针每轮把它 `say` 进日志，`/pool lost` 与它读同一本账）。
 
 ### 8.3 端到端跑在真宿主里，不在假宿主里
 

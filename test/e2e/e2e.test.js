@@ -29,6 +29,6 @@ for (const check of report.checks) {
 
 test('端到端：探针把该跑的检查都跑了', () => {
   // 探针中途抛错时报告是半截的，条数会掉下来。这个下限就是「跑全了」的凭据：
-  // 四条前置 + 十九条真机检查。
-  assert.ok(report.checks.length >= 23, `只有 ${report.checks.length} 条检查，少于预期的 23 条`)
+  // 四条前置 + 二十六条真机检查。
+  assert.ok(report.checks.length >= 30, `只有 ${report.checks.length} 条检查，少于预期的 30 条`)
 })

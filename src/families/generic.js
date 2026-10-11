@@ -178,6 +178,27 @@ export function declaredModels(auth = {}) {
   return out
 }
 
+/**
+ * 目录里见过的模型元数据：模型 id → `{ entry, live }`。
+ *
+ * `resolveModel()` **必须**能说出这个模型收不收图、上下文多大——宿主拿这份元数据决定
+ * 要不要把图片换成一句占位文字（`projectImagesForTextModel`：模型不收图时，
+ * 图片块在到达适配器之前就被换掉了）。原先这里固定回一份空源，于是**所有**模型
+ * 都被当成只收文字，连上游目录明说收图的也一起被换掉（端到端第一次抓到的就是这个）。
+ *
+ * 「声明」的条目不许覆盖「目录」里见过的真元数据：声明常常只写了 id 与上下文。
+ */
+const catalogMemory = new Map()
+
+function rememberCatalog(models, live) {
+  for (const model of models) {
+    if (model?.id === undefined) continue
+    const known = catalogMemory.get(model.id)
+    if (known?.live === true && !live) continue
+    catalogMemory.set(model.id, { entry: model, live })
+  }
+}
+
 /** 上游目录响应 → 统一的模型条目。OpenAI 与 Anthropic 都是 `{data:[...]}`。 */
 export function parseCatalog(json) {
   const list = Array.isArray(json?.data)
@@ -402,6 +423,9 @@ export const genericFamily = {
     for (const model of secondary) if (!byId.has(model.id)) byId.set(model.id, model)
 
     const models = [...byId.values()].map((model) => modelInfo(model.id, model.name, model))
+    // 目录与声明都记下来：`resolveModel()` 只拿得到一个模型名，说不清它的形状。
+    rememberCatalog(live, true)
+    rememberCatalog(declared, false)
     if (models.length > 0) return models
 
     const error = new Error(
@@ -413,7 +437,9 @@ export const genericFamily = {
   },
 
   resolveModel(provider, model) {
-    return modelInfo(model, model, {}, provider)
+    // 目录里见过就用目录里的（`listModels` 每次装配都会喂进来），没见过才回保守默认值。
+    const known = catalogMemory.get(model)?.entry
+    return modelInfo(model, known?.name ?? model, known ?? {}, provider)
   },
 
   // 这一族没有 `quota`：接口形状取决于对端，猜不如不猜（`undefined` = 不显示额度条）。

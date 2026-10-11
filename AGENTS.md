@@ -47,13 +47,13 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
   之后每次约一分钟。装在 `test/e2e/.home`（已 gitignore），**不动你自己的 `~/.dsh`**。
 - 宿主不在默认位置时：`DSH_DESKTOP`（安装目录）或 `DSH_HOST_EXE` / `DSH_HOST_CLI`；
   换装目录：`BRIDGE_E2E_HOME`；宿主里没有 web-app 时可 `BRIDGE_E2E_WEBAPP_VERSION` 指定版本。
-- 探针在宿主里做事，有三条宿主契约必须遵守，见下。
+- 探针在宿主里做事，有四条宿主契约必须遵守，见下。
 - 假上游是**刻意难伺候**的：Anthropic 那条路只发 `data:` 不发 `event:`；不认 `stream_options`；
   不认 `cache_control`；不认 Claude Code 的身份块；还专门有几个「坏模型」
   （先吐思考再报错、返回一个 HTML 页面、403 的 Cloudflare 页、429 说「一周后再来」、429 说「余额不足」）。
   它是验收台，不是便利设施——**不要为了让自己那关过而把它改宽容**。
 
-## 三条宿主契约（都是踩出来的）
+## 四条宿主契约（都是踩出来的）
 
 1. `ctx.inject([...], cb)` 的回调里**抛出去是静默的**：探针会一声不响地停在半路。
    整段必须包 try/catch，并且无论如何都要把报告落盘。
@@ -62,6 +62,12 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
    判断一次推理成没成，要看这个块，不是看有没有 throw。
 3. `llm.listProviders()` 之类的返回值**不一定是 promise**（可能同步返回数组），
    对返回值直接 `.catch()` 会抛 TypeError。
+4. 适配器收到的消息里，图片块是 `{ type: 'image', attachment: { attachmentId, mediaType, … } }`,
+   **不是** base64。要自己经 `ctx.get('attachments')` 的 `readImage(ref)` 解引用
+   （池子在 `#withImageData` 里替所有族做了一次，读不到就照实报诊断、不吞）。
+   助手轮还带 `source: { kind: 'model', provider, model }`，缺了宿主会在 `source.replayState` 上抛。
+   ——`ctx` 是 `src/index.js` 那个 `familyContext`，**它的 `get` 是通往宿主服务的唯一门**；
+   曾经它连 `get` 都没有，于是图片与 CommandCode 的凭据源被静默废掉了一整轮。
 
 ## 目录
 

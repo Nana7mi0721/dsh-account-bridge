@@ -152,7 +152,16 @@ export function apply(ctx, config) {
 
   const families = assertUniqueRoutes(selectFamilies(settings.families))
   const fetcher = createFetcher({ log })
-  const familyContext = { fetch: fetcher, log, config: settings }
+  // 族与池子拿宿主服务的**唯一入口**。`familyContext` 是普通对象，没有 `get`——真机验收
+  // 因此抓到一个静默降级：池子读图片附件时 `this.#ctx.get?.('attachments')` 恒为 undefined，
+  // 于是每一张图都原样带着引用进翻译层，被当成「没有数据的图片」丢掉。这里补上惰性求值：
+  // 调用发生在请求那一刻，服务那时早已就绪；`serviceOf` 同时兜住「没注册会抛」那条路。
+  const familyContext = {
+    fetch: fetcher,
+    log,
+    config: settings,
+    get: (name) => serviceOf(ctx, name),
+  }
 
   const store = new AccountStore(() => serviceOf(ctx, 'credentials'), log)
   const health = new CooldownTable()

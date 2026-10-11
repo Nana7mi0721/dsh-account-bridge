@@ -64,6 +64,8 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 本机 MiniMax Code 登录态发现与导入（`~/.minimax/auth/prod/{en,cn}/mcode-public/auth.json`） | ✅ 真机验证 |
 | MiniMax Code 令牌刷新 + **写回桌面端**（generation CAS，防两边互相踩） | ✅ 真机验证（对真实文件跑通，令牌每刷必换是实测事实） |
 | Anthropic 线协议翻译（system 分块 / cache 断点 / tool_result 配对 / SSE 分槽累积） | ✅ 端到端（探针里那条 Anthropic 方言推理；只发 `data:` 不发 `event:` 的响应也认） |
+| 把宿主交来的图片附件（`{type:'image', attachment}`）解引用成 base64 再交给翻译层 | ✅ 端到端（两种方言各一条请求形状检查）；**曾是一个真缺陷**：池子从 `ctx.get` 拿不到附件服务，于是每一张图都被静默丢掉 |
+| 「翻译回显」七条：工具调用拼 JSON、零值不擦用量、截断归 `max-tokens`、思考签名一字不丢、默认不回放、两种方言的请求形状 | ✅ 端到端（假上游回脚本化的流，探针断言宿主看见的 chunk 序列） |
 | 客户端版本号诚实化（查 npm registry，拿不到就用兜底常量并如实标注） | ⚠️ 只在真机请求里体现（本机没有这两家订阅，端到端探针不覆盖） |
 | 账号池调度：首发实质输出前才允许换号 + 冷却表 + 退避 | ✅ 真机验证 |
 | 选号排序（额度档位 / 节奏 / 被限流过的沉底） | ✅ 真机验证（fake 上游上看得到谁先上） |
@@ -565,9 +567,12 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
    （`claude-mock-hold` 先吐 20 个思考块再报错、`mock-html-page` 回一整页 HTML、
    `mock-cf-403` 回 403 的 HTML、`mock-429-week` 回带一周 `retry-after` 的 429、
    `mock-credit` 回「余额不足」）。**不许为了让自己那关过而把它改宽容。**
+   它还把**收到的每一笔请求原样记下来**（`GET /__requests`，只留最近 50 笔），
+   所以探针能回头质问「我这一笔到底发出去长什么样」；`mock-openai-only` 与
+   `mock-anthropic-only` 两个模型各自只出现在一条方言的目录里，用来把一笔请求钉死在一条路上。
 3. 起一个**真的无头宿主**（`<exe> <cli.js> --profile e2e`，`DSH_HOME` 指向 `test/e2e/.home/`），
    插件是按 `link:` 装进去的 ⇒ **改 `src/` 立刻生效，改探针要重跑**。
-4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 19 条检查，结果写进报告文件再由 `npm test` 读回来。
+4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 26 条检查，结果写进报告文件再由 `npm test` 读回来。
 
 要求 Node ≥ 20 与一份 DSH 桌面版（默认 `D:\Program\deepseek harness desktop`，
 可用 `DSH_DESKTOP` / `DSH_HOST_EXE` / `DSH_HOST_CLI` 覆盖）。临时 profile 建在
@@ -578,14 +583,32 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 （chunk 序列、`finish.reason.kind`、`failure.code`、数据面返回的字段）。断言要写在探针里、
 **不要**挪到 `e2e.test.js`——那里只负责把报告翻译成测试结果，一行判断都不要有。
 
+**「翻译回显」这一组检查是替代品**：单元测试时代有一套 golden 快照，逐字节钉住 12 个翻译器
+的请求体与 chunk 序列。那套快照随单元测试删了，现在由七条真机检查接着守同一件事——
+假上游回**脚本化的流**，探针断言宿主最终看见的 chunk 序列：
+
+| 检查 | 假上游演什么 | 断言什么 |
+| --- | --- | --- |
+| 工具调用 | `mock-tool-call` 分三片吐 `input_json_delta` / `tool_calls` 增量 | 宿主拿到**一个** `tool-call` 块，`arguments` 是拼好的 JSON 字符串，收尾是 `tool-calls` |
+| 用量不擦零 | `mock-usage-zero` 先报 4242，再报一帧全零 | 最后一帧的零**没有**把 4242 擦成 0 |
+| 截断 | `mock-cut-short` 用 `finish_reason:'length'`（Anthropic 那边是 `pause_turn`） | 收尾是 `max-tokens`，不是 `stop` |
+| 签名不丢 | `mock-signed-thinking` 分两片吐 `signature_delta` | `finish.replayState` 里那个签名一个字符不少 |
+| 默认不回放 | `mock-anthropic-only` | 发出去的请求里**有**上一轮的话、**没有**上一轮的思考与签名 |
+| 请求形状 ×2 | 两种方言各一条 | system、工具定义、图片 data URL / image 块、`tool_result` 配对、`max_tokens`、`stream_options` 各自该长成什么样 |
+
 两条老实话：端到端能证明「接上去是对的」，证明不了「我不知道的那条规则有没有被改动」；
-随着单元测试一起删掉的还有 W8 那套翻译层 golden 快照（12 个翻译器的规则面），
-现在只由探针里那几条真机检查（思考不算输出、失败归类、声明式目录）间接守着。
+上面那七条检查覆盖的是**已经被撞见过**的那部分规则面，没撞见过的规则仍然没有守卫。
 
 ## 设计要点
 
 - **静态 `inject` 恒为空数组**，一律用惰性 `ctx.inject([...], cb)`：静态注入一个该 composition
   里不存在的服务会让 entry 永久 pending，而 loader 把 pending 当 **profile 加载失败**。
+- **族与池子拿宿主服务只有一条路：`ctx.get(name)`**（`ctx` 就是 `src/index.js` 里那个
+  `familyContext`，它的 `get` 是 `serviceOf(ctx, name)` 的惰性转发）。**真机验收抓到过这条的代价**：
+  `familyContext` 原先是个没有 `get` 的普通对象，于是 `ctx.get?.('attachments')` 恒为 undefined，
+  每一张图片都原样带着引用进翻译层、被当成「没有数据的图片」丢掉——翻译层照旧报诊断、
+  套件照旧全绿，只有真宿主里那张图从来没到过上游。同一条路还静默废掉了 CommandCode 族
+  四源凭据里的第一源（`credentials` 服务）。**加新服务时先确认 `serviceOf` 认得它**。
 - **流式换号只在「一个字都还没吐出去」时做**。`block-start` 不算输出，`block-end` 带内容才算；
   一旦有实质输出，失败只能记健康状态，绝不重放（否则用户会看到重复文本）。
 - **「思考」也不算输出，但憋着有三个上限**（`src/pool.js`）。这条值得单独讲：Claude 会在
