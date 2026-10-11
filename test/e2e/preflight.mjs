@@ -51,10 +51,18 @@ export function preflight(repo) {
   // 2. 借来的代码必须登记，且登记过的文件要指回台账。许可不同（MIT / Apache-2.0 / AGPL-3.0），
   //    台账是唯一能回答「这一行是从哪来的」的地方。
   const notices = read(join(repo, 'THIRD_PARTY_NOTICES.md'))
-  const listed = [...notices.matchAll(/`(src\/[^`]+?\.js)`/g)].map((match) => match[1])
-  const unmarked = listed.filter((path) => {
+  //    只认**表格行**里的反引号：台账是「借了什么 → 落在哪个文件」的表格，而散文里顺口提
+  //    一句「复用本仓的 `src/wire/chat-completions.js`」不是在主张那个文件是借来的——
+  //    这种句子曾经让一个共享文件被要求加来源标注（真发生过一次），于是只能改措辞绕开。
+  //    现在只把表格行当主张，并把命中行号带进失败信息里（否则报告只说「没有注明来源」）。
+  const listed = notices
+    .split('\n')
+    .flatMap((line, index) => (line.trimStart().startsWith('|')
+      ? [...line.matchAll(/`(src\/[^`]+?\.js)`/g)].map((match) => ({ path: match[1], line: index + 1 }))
+      : []))
+  const unmarked = listed.filter((claim) => {
     try {
-      return !read(join(repo, path)).includes('THIRD_PARTY_NOTICES.md')
+      return !read(join(repo, claim.path)).includes('THIRD_PARTY_NOTICES.md')
     } catch {
       return true
     }
@@ -62,7 +70,9 @@ export function preflight(repo) {
   checks.push({
     name: '前置：台账里列出的每个文件都指回 THIRD_PARTY_NOTICES.md',
     pass: listed.length > 0 && unmarked.length === 0,
-    detail: unmarked.length ? `没有注明来源：${unmarked.join(', ')}` : `台账登记 ${listed.length} 个文件`,
+    detail: unmarked.length
+      ? `没有注明来源：${unmarked.map((claim) => `${claim.path}（台账第 ${claim.line} 行）`).join(', ')}`
+      : `台账登记 ${new Set(listed.map((claim) => claim.path)).size} 个文件`,
   })
 
   // 3. 会写盘的源码文件只准是那两个族（它们要刷新桌面端的凭据文件，且都带 CAS）。

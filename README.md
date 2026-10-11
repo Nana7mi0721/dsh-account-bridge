@@ -4,10 +4,10 @@
 CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
 而不是每家用一个插件。
 
-> 状态：**P6 完成**——骨架 + 13 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
-> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `generic`）+
+> 状态：**P6 完成**——骨架 + 14 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `raccoon` / `generic`）+
 > 本机账号统一发现 +
-> 设置页账号池面板 + `/pool` 命令族。13 条 route 已在真实 DSH 宿主里验证可见
+> 设置页账号池面板 + `/pool` 命令族。14 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
 > **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
@@ -16,6 +16,9 @@ CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一
 > 与「账号选得不对」这两类问题，11 个工作包，**W0–W11 全部完成**；此后是 **P7.5 独立审查**
 > （四个审查员、十处修复）与 **P7.7 失败分类的两处修正**：403 说到余额时归额度而不是鉴权，
 > 以及「每个账号都回 401」不许把整池各停一天（见下面「设计要点」）。
+> **P7.8 把 P7.5 遗留的六处改了**：代理配了却静默直连、面板的「解冻」是空话、
+> 删账号不清粘性/冷却、`discover` 忽略 `family`、codex 每个请求都是新会话、
+> 流量闸门在限额调大后不再升序（逐条见「设计要点」与《深度改进计划书》§P7.8）。
 >
 > 测试：**只有端到端测试**（`test/e2e/`，起假上游 + 起真的无头宿主），
 > 单元测试与回归测试都已删除；规矩写在 [AGENTS.md](AGENTS.md)。
@@ -79,6 +82,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 端到端验到 route 与元数据；**真机仅验到第一条**（本机凭据是 5.6 的密文） |
 | 把 CodeBuddy（腾讯，中国版）家族注册成 provider route（`acct-codebuddy`，显示名 `CodeBuddy（腾讯）`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的只有「发现」这一半：本机那份 5.6 密文凭据被它按文件里的 `auth.domain` 认成自己的（`www.codebuddy.cn`），并被如实报成「密文，请改用手动粘贴令牌」。**没有可用的明文令牌，一次真实推理都没跑过** |
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
+| 把 Raccoon（商汤小浣熊）家族注册成 provider route（`acct-raccoon`，显示名 `Raccoon (商汤)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 Raccoon Work 客户端，也没有账号**）。真机验到的是**上游那一侧**：五个端点都活着（`chat/completions` / `model_catalog` / `user_info` / `points/balance` / `auth/refresh`），并用**明显无效的令牌**捕获了真实错误形状（401 是 `{"code":200003,"message":"authorization_verify_error",…}`，不带认证头是 `200001 authorization_empty_error`，`refresh` 用坏令牌是 `400 100002 params_invalid_error`）——三条都证明认证头确实是 `Authorization: Bearer` |
 | **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
 | **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
@@ -178,7 +182,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
 
 **卡片摘要怎么落到我们的 provider 上**：那是 keyed 席位，key 是该 provider 的 `settingsNs`。
-我们的 13 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
+我们的 14 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
 `joinProviderDirectory()` 给这类 provider 填的 `settingsNs` 就是**空字符串**，
 所以用 `key: ''` 注册一条就能落到所有这些卡片上——组件内部再按 route 过滤，
 别人的卡片一律返回 `null`。
@@ -500,6 +504,7 @@ src/
     copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
     trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
     zcode.js          ZCode（智谱）两条通道：端点/凭据分派 + 官方身份块 + 3012 风控识别
+    raccoon.js        Raccoon（商汤小浣熊）纯协议层：信封/目录归一 + 积分投影（SSE 复用 chat-completions）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
     failure-words.js  失败词表：同一个 429 的两条路说同一句话（见「设计要点」）
     diagnostics.js    翻译层的结构化诊断（只上报不抛错，有界、去噪、去重）
@@ -517,6 +522,7 @@ src/
     copilot.js        Copilot 族（设备码；非公开接口，随时可能失效）
     trae.js           Trae 族（私有协议；凭据只读，不写回）
     zcode.js          ZCode（智谱）族（两条通道二选一；凭据只粘贴，不解密磁盘密文）
+    raccoon.js        Raccoon（商汤小浣熊）族（凭证只粘贴；目录失败回落兜底表；不实现领取）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
@@ -635,7 +641,10 @@ P7 十一个工作包做完之后，**四个独立子代理**分头读了一遍�
 9. **agy 把「问不到」当成「空目录」**（`src/families/agy.js`）：CLI 超时/非零退出时 `probe.signedIn=false`，`listModels()` 于是老老实实回 `[]`，池子把这份**假空目录**缓存十分钟——面板会说「没有账号提供 X」，一句我们并不知道真假的话。现在探测结果带 `unknown`，`listModels()` 抛出 `TRANSPORT`（瞬态、不罚账号、下次再问），扫描结果也照实说「这次没问出登录状态」而不是「还没登录」。
 10. **`assertApiReply` 会把正文读空再还回去**（`src/wire/assert-reply.js`）：非 2xx 且 `content-type: text/html` 时它读整个 body 嗅探，看走眼之后**原样返回一份已经读空的响应**——五个调用点都写着 `.catch(() => '')`，上游到底说了什么就永久丢了，排障时只看到一句「没原因」的 403。现在把读到的内容装回一份等价物。
 
-**这一轮没修、记在计划书里的**：闸门让位时会把冷却中的账号排到前面、`/pool sticky` 的 `full` 判据偏弱、`COOLING` 落进失败归类兜底、`gate.js` 的 rpm 队列在限额调大后不再升序、透明代理配置错误时静默直连、`account_bridge_accounts_remove` 漏了清健康/粘性状态、`discover` 把「读不出来」当成「不在本机」等十余条次要项（见《深度改进计划书》§P7.5 遗留）。
+**这一轮没修的**：闸门让位时会把冷却中的账号排到前面、`/pool sticky` 的 `full` 判据偏弱、`COOLING` 落进失败归类兜底，以及协议层/族侧/面侧十余条次要项（见《深度改进计划书》§P7.5 遗留）。
+**其中六条已在 P7.8 改掉**：`gate.js` 的 rpm 占位表在限额调大后不再升序、代理配错时静默直连、
+面板的 `unfreeze` 不真清冷却、`account_bridge_accounts_remove` 漏清粘性与冷却、
+`discover` 忽略 `family`、codex 的 `session-id` 每请求现摇（逐条见「设计要点」的 P7.8 一段）。
 
 ## 测试
 
@@ -659,13 +668,14 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
    不认 `Claude Code` 身份块、密钥不对回 401，另有一批专演事故的模型
    （`claude-mock-hold` 先吐 20 个思考块再报错、`mock-html-page` 回一整页 HTML、
    `mock-cf-403` 回 403 的 HTML、`mock-429-week` 回带一周 `retry-after` 的 429、
-   `mock-credit` 回「余额不足」）。**不许为了让自己那关过而把它改宽容。**
+   `mock-credit` 回「余额不足」、`mock-403-credit` 用 403 说「余额不足」、
+   `mock-401-all` 让**每个账号**都回 401）。**不许为了让自己那关过而把它改宽容。**
    它还把**收到的每一笔请求原样记下来**（`GET /__requests`，只留最近 50 笔），
    所以探针能回头质问「我这一笔到底发出去长什么样」；`mock-openai-only` 与
    `mock-anthropic-only` 两个模型各自只出现在一条方言的目录里，用来把一笔请求钉死在一条路上。
 3. 起一个**真的无头宿主**（`<exe> <cli.js> --profile e2e`，`DSH_HOME` 指向 `test/e2e/.home/`），
    插件是按 `link:` 装进去的 ⇒ **改 `src/` 立刻生效，改探针要重跑**。
-4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 34 条检查，结果写进报告文件再由 `npm test` 读回来。
+4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 38 条检查，结果写进报告文件再由 `npm test` 读回来。
 
 要求 Node ≥ 20 与一份 DSH 桌面版（默认 `D:\Program\deepseek harness desktop`，
 可用 `DSH_DESKTOP` / `DSH_HOST_EXE` / `DSH_HOST_CLI` 覆盖）。临时 profile 建在
@@ -730,7 +740,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   | 事实 | 后果 |
   |---|---|
   | `assembled()` 拿 `envelope.blocks.length` 与**它自己见过的块数**对一下，对不上就**整个信封丢掉** | `blocks` 必须与流里**出现过的**块一一对齐，而且是「见过的顺序」不是「留下的顺序」——`max-tokens` 会丢掉工具调用块，那时宿主**按同样的位置**过滤信封，我们照样得为被丢掉的块留一个占位 |
-  | 我们 13 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
+  | 我们 14 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
   | 签名是**某一个账号**签的 | 回放只给**第一个**候选（`replay: this.#replay && index === 0`）。换号之后把上一家签的东西发给下一家，是既没验过也不该发生的事——上游会拒，而我们无从分辨那是「格式不对」还是「这不是你签的」 |
   | **读不懂就是没有**，绝不抛错 | 版本不认识、模型换了、块数不齐、类型对不上——统统一声不响地降级成「不带这个状态」。宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400 |
 
@@ -871,6 +881,29 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   让账号被按「欠费」冻了半小时，屏幕上却写着 `RATE_LIMIT`。当时有一条不变量用例逐条比对
   `error.code` 与冷却裁决必须永远一致（那份用例随单元测试一起删了；
   现在由端到端探针里两条 429 检查——`mock-credit` 与 `mock-429-week`——守着同一件事）。
+- **P7.8：六处「说了但没做」的地方**（都是 P7.5 独立审查留下的，改完各配了一条端到端检查）：
+  - **配了出口代理就必须真的走代理**。`src/http.js` 从前在拿不到 `undici` 时只记一句日志，
+    然后每个请求都**悄悄走直连**——用户以为换了 IP，请求却带着真实地址出去了，而这一切在
+    成功的响应里完全看不出来。现在它抛 `PROXY_UNAVAILABLE`（不罚任何账号：一次请求都没发出去）。
+    同时 `undici` 改为按两个基址解析：先按本模块（正式安装时它在 profile 的 `node_modules` 里），
+    失败再按**宿主进程的入口**（开发时插件是 `link:` 到仓库的，Node 按 realpath 解析就找不到
+    profile 那一层，而桌面版宿主自带 `dsh/node_modules/undici`）。探针里那条检查的判据是反的：
+    四个账号都配上打不通的代理之后，请求必须失败、而且**假上游一个字节都没收到**——要是拿到了
+    回答，说明又回到了静默直连。
+  - **面板上的「解冻」从前是一句空话**：它只让候选人重新装配，**一条冷却都没清**，回话却说
+    「已解冻」。命令面（`/pool unfreeze`）一直是对的——同一件事两条面做得不一样，正是这类
+    bug 最常见的来路。现在两支分支都真的清，并把清掉的条数作为 `removed` 回出去。
+  - **删账号要把指向它的记录一起带走**：账号 id 会**回收**（`codex-1` 删掉之后会被下一个账号
+    拿到），粘性记录会让新账号被当成旧账号的替身去答同一个会话，冷却会让它继承一笔没犯过的错。
+    工具面从前只清了目录缓存；HTTP 面本来就做对了。
+  - **`account_bridge_discover` 的 `family` 参数从前在「只报告」模式下被完全忽略**：`family: 'codex'`
+    会把每一族都扫一遍，输出看起来完全正常，用户只会以为「这一族本机没有可导入的账号」。
+    现在它真的只扫那一族，**并且族名写错时会说出来**（列出可选的族名），不许静默扫全部。
+  - **codex 的 `session-id` 从前每个请求现摇一个**——也就是每个请求都是新会话，同一段对话反复
+    回来上游每次当第一次见。现在与 `prompt_cache_key` 同源（按账号 + 会话派生）。
+  - **流量闸门的占位表必须保持升序**：限额被调大之后（1 → 5），窗口里可能已经躺着两个未来的
+    占位，而新一次请求的时刻落在它们**之前**；原先的 `push` 会破坏顺序，于是本该等一分钟的
+    请求拿到「现在就走」。改成按位置插入。
 - **导入来的凭据默认只读**：刷新出的新令牌不回写对方的文件，避免和 CLI 互相踩。
   唯一的例外是 `minimax`——它的刷新令牌是一次性的、而令牌文件是桌面端与本插件共用的，
   不写回就等于把用户踢下线（见上面那一节）。加新族时**默认按只读处理**，
@@ -964,6 +997,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 | `copilot` | `acct-copilot` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有 Copilot 订阅） |
 | `trae` | `acct-trae` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有任何 Trae 账号） |
 | `zcode` | `acct-zcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的是：两条通道都活着且可达、无凭据时 401 的形状（两通道不同）、本机 ZCode 客户端的 6 条凭据**全是 `enc:v1:` 密文**（见下） |
+| `raccoon` | `acct-raccoon` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装客户端、没有账号）。真机验到的是：五个端点都活着、三条真实错误形状已捕获（`200003` / `200001` / `100002`）、认证头确实是 `Authorization: Bearer`；本机发现如实报「没有可导入的凭据位点」并列出查过的路径（见下） |
 
 **明确不做的族，以及为什么**：
 
@@ -972,6 +1006,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   本插件再写一份只是把同一件事做第二遍。**不做。**
 - **`cursor`**——计划书 §4.1 判据 C4 明确排除：Cursor 员工已公开认定这类接入违反其 ToS §1.5。
 - **`zcode` 的签到/领取**——按用户决定砍掉（族本身已实现，砍掉的是它的积分领取）。
+- **`raccoon` 的签到/领取**——按用户决定砍掉。这一族更彻底：它的每日积分是**服务端按日自动发**的，客户端里根本没有对应的端点，唯一那个 `desktop/v1/login/points/grant` 是**写**请求（会改变账号状态）。本仓只保留纯查询的 `quota()`。
 
 **关于 `grok` 与 `copilot` 的一句实话**：宿主内置也已经有 `xai` 与 `github-copilot` 两个 OAuth provider
 （`dist/auth/oauth/xai.js` 用的 client_id 就是 `b1a00492-073a-47ea-816f-4c329264a828`）。
@@ -1049,6 +1084,67 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   `source` 强度**（`temp/codearts` 的实测记录），不是本仓的抓包。
   ⚠ 无凭据时 401 在 3012 **之前**判定，所以连「身份块对不对」的**负向**判据都拿不到——
   这条限制必须写在这里，免得下次有人以为「跑一下就验过了」。
+
+**`raccoon` 族（商汤小浣熊）的取舍，以及它为什么是「粘贴 + 只读」**：
+
+- **登录只做粘贴（`access_token`，可选 `refresh_token`）**。它的官方客户端有扫码登录与短信登录，
+  但两条都不是「插件里静默做完」的事：扫码要把二维码**渲染给用户看**（还要轮询状态），
+  短信要过**阿里云滑块验证码**（`aliyunCaptcha.sceneId` / `prefix`）且手机号得按
+  AES-128-CFB 加密（`phoneCipherSecret`）。参考实现是靠一个**网页 carrier page** 才做到的，
+  本仓没有那一层。⚠ **代价要说清楚**：在 agent 场景里加不了账号——`src/login/broker.js`
+  只自动回答「只有一个选项的 select」，而这里连 select 都不是，是一条 `secret` 提示。
+  想给这一族加账号，只能从设置页进（与契约 §4.3 描述的 `generic` 族处境相同）。
+- **不实现转账、不实现签到。** 每日积分是**服务端按日自动发**的（参考实现里压根没有这个端点），
+  唯一那个 `desktop/v1/login/points/grant` 是**写**请求。本仓只保留纯查询的 `quota()`
+  ——读 `points/v1/balance` 的 `available_points`，读不到就 `undefined`，**绝不编 0**。
+- **额度只有「现在有多少」，没有「一共有多少」。** 上游不给总额字段，而 DSH 的额度窗口只吃
+  「剩余比例」。本仓的处置是**把它投影成一个只增不减的累计读数**：分母是有效期内见过的最大余额，
+  窗口名写成「积分余额 4200（每日积分 300）」把绝对数带出来。
+  ⚠ 这是一个**有代价**的选择：用户看到的比例是「相对我见过的最多那次」，不是「还剩 30%」。
+  另一条路（回 `remainingFraction: 1`）是在编一个看起来很好的读数，按 §C3 比不报更糟。
+  `available_points: 0` 是**真实读数**（用完了），与「没这个字段」严格区分——判据是字段在不在。
+- **思考档位只有「开 / 关」两态，而且必须走 `extra_body`。** 上游**接受** `reasoning_effort`
+  的 8 个枚举值却**不产生任何可观测效果**（参考实现 8 轮配对实验：`max-minimal` 的差值 4 正 4 负，
+  纯随机），真正有效的是 `extra_body.thinking.type`。所以本族只暴露 `on` / `off` 两档，
+  **不假装**有强度档；收到别的档位就报诊断、不下发。⚠ 另一个更贵的坑：`thinking` 放**顶层**
+  会被静默忽略（连非法值都不报错），表现为「开关按了没反应」。
+  另外「开启」档**刻意不下发**这个字段——实测「不发参数」与「显式 enabled」等价，
+  少发一个字段就少一个上游方言变了之后的失败面。
+- **一律声明支持图片。** 这是本仓与参考实现**唯一有意不同**的一处能力声明。它早期按远端目录的
+  `tags` 判图片能力，而 `sn-deepseek-v4-1-flash` 的 tags 恰好没有 `vision`
+  ⇒ 播报 `inputModalities: ['text']` ⇒ **DSH 在 `LlmRuntime` 里把图片替换成文本占位符**
+  ⇒ 图根本没发出去，用户看到的却是模型说「我读不到图片」。它后来用「带随机 6 位数字的图」实测推翻了
+  `tags`（该模型 5/5 读对），并穷举了目录条目的键并集——**远端从不下发模态字段**。
+  本仓因此不按 tags 判，一律 `['text','image']`：没有否据时默认「可能支持」，
+  真遇到纯文本模型，代价是一条清楚的 400，好过图片被静默换成占位符。
+  ⚠ 这条**本仓真机未验**（没有账号），是照抄它的实测结论。
+- **有一格失败分类与参考实现有意不同。** `403 + "积分不足"` 在它那里归额度（写 24 小时冷却），
+  在本仓落 **`AUTH`**（只换号）。方向是「宁可漏判不可误伤」：它自己那条事故就是朝误判方向的
+  ——上游网关对**全池**回 `401 authorization_verify_error` 时，一个请求内 6 个号各被封 24 小时、
+  整个 provider 死一天。而 `401/403 先判状态码` 这条**两边是一致的**（共享的
+  `src/wire/http-error.js` 已经吸收了它）。
+- **本机发现必须说「没有位点」，且要列出查过哪些路径。** 这一族比 ZCode 更彻底：
+  ZCode 是「有凭据但是我们不读」，它是**连位点都不存在**（登录态只在客户端进程内存里，
+  退出即失效，磁盘上不落盘）。返回空数组等于把**不存在**说成**这一族不支持导入**，
+  所以 `discover()` 永远返回一条 `importable:false` + 一份可复核的路径清单。
+- **图片字节预算照旧不做。** 参考实现为这一族定的字节目标是 512 KiB（它的网关硬限 10 MB、超了回 `HTTP_413`），而本仓的池子是**原样发附件库里那张图**——这件事在「未定事项」里已经登记过，本族**不单独开一条口子**：要做就统做，只给一个族做会让「为什么这家会缩图、那家不会」变成新的困惑。
+- **`risk: 'high'`。** 请求体里**没有任何客户端侧签名**，认证就是一个明文 `Bearer` 令牌；
+  而参考实现明确记着上游网关会**与某个号的额度无关地**对全池回 401。可用性不完全由我们的账号状态决定。
+
+**关于 `raccoon` 真机验证到什么程度的一句实话**：本机**没有 Raccoon Work 客户端、没有任何账号**，
+`~/.raccoon` 与 Electron 的 `userData` 目录都不存在，所以**一次推理都没跑过**。
+
+- **真机验到的（`captured`）**：五个端点都活着。不带认证头打 `chat/completions` 是
+  `401 {"code":200001,"message":"authorization_empty_error","details":"authorization empty"}`；
+  带**明显无效的令牌**打 `chat/completions` / `model_catalog` / `user_info` / `points/balance`
+  四条全是同一个信封 `401 {"code":200003,"message":"authorization_verify_error","details":"authorization verify failed"}`
+  （`Server: nginx`，`Content-Type: application/json`）；`auth/refresh` 收坏令牌是
+  **`400`（不是 401）** `{"code":100002,"message":"params_invalid_error","details":"param token invalid format invalid"}`。
+  三条形状放在一起说明：认证头确实是 `Authorization: Bearer`（空头与坏头**分属两个业务码**），
+  而 **`200003` 这个业务码是真的**（参考实现就是按它判「登录态已过期」的）。
+- **只有证据、没有真机（全是 `source` 强度）**：真的能推理、模型目录的真实内容、
+  `points/balance` 的真实字段、`refresh` 真的能换到新令牌、图片能力、思考开关的实际效果。
+  **这六项一条都没有本仓的抓包**，全部来自 `temp/codearts` 的自测记录。
 
 ## 未定事项
 

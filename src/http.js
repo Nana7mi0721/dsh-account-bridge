@@ -14,12 +14,39 @@
  * @module dsh-account-bridge/http
  */
 
+import { createRequire } from 'node:module'
+import { pathToFileURL } from 'node:url'
+
 /** @type {Promise<any> | undefined} */
 let undiciPromise
 
-/** 尽力加载 undici；拿不到就退化成「不支持每账号代理」的普通 fetch。 */
+/**
+ * 尽力加载 undici。找不到就返回 `undefined`，**由调用方决定怎么处理**。
+ *
+ * 为什么要找两个地方：本模块解析 `undici` 是按**真实路径**走的，而本插件在开发时是
+ * `link:` 到仓库的（仓库里没有 `node_modules`），正式安装时才是 profile 的
+ * `node_modules/dsh-account-bridge`（那一层有 undici —— pnpm 的 `hoistPattern: ['*']`
+ * 把它提上来了）。所以先按常规解析，失败再按**宿主进程的入口**解析一次：桌面版的宿主
+ * 自带一份 `dsh/node_modules/undici`，从那儿能拿到。
+ */
 function loadUndici() {
-  undiciPromise ??= import('undici').catch(() => undefined)
+  undiciPromise ??= (async () => {
+    try {
+      return await import('undici')
+    } catch {
+      /* 按本模块解析不到，换宿主那一份 */
+    }
+    for (const from of [process.argv[1], process.execPath]) {
+      if (typeof from !== 'string' || from.length === 0) continue
+      try {
+        const require = createRequire(from)
+        return await import(pathToFileURL(require.resolve('undici')).href)
+      } catch {
+        /* 换下一个 */
+      }
+    }
+    return undefined
+  })()
   return undiciPromise
 }
 
@@ -32,16 +59,21 @@ export function createFetcher(options = {}) {
   const { log } = options
   /** @type {Map<string, any>} */
   const agents = new Map()
-  let warned = false
 
   const dispatcherFor = async (proxyUrl, streaming) => {
     const undici = await loadUndici()
     if (!undici) {
-      if (!warned) {
-        warned = true
-        log?.warn?.('account-bridge: undici 不可用，每账号出口代理已禁用（请求将走全局出口）')
-      }
-      return undefined
+      // **不许在这里悄悄走直连**。账号上写了代理就是要求流量从那个出口出去，静默改走本机
+      // 出口的后果是：用户以为换了 IP，实际上请求带着他的真实地址出去了——而这一点在成功
+      // 的响应里完全看不出来。宁可失败得响亮。
+      throw Object.assign(
+        new Error(
+          'account-bridge: this account has a proxy configured, but the "undici" package is not '
+            + 'reachable from the plugin, so the proxy cannot be used. Install the plugin normally '
+            + '(not as a link: to a checkout), or clear this account\'s proxy.',
+        ),
+        { code: 'PROXY_UNAVAILABLE' },
+      )
     }
     // 流式与普通分开缓存：流式那个必须关掉 bodyTimeout，不能拿来做普通请求
     const cacheKey = streaming ? `stream\u0000${proxyUrl}` : proxyUrl
@@ -58,7 +90,6 @@ export function createFetcher(options = {}) {
   const fetchWith = async (url, init, proxyUrl, streaming = false) => {
     if (!proxyUrl || typeof proxyUrl !== 'string') return fetch(url, init)
     const dispatcher = await dispatcherFor(proxyUrl, streaming)
-    if (!dispatcher) return fetch(url, init)
     return fetch(url, { ...init, dispatcher })
   }
 

@@ -35,6 +35,7 @@ const ROUTES = [
   'acct-copilot',
   'acct-trae',
   'acct-zcode',
+  'acct-raccoon',
   'acct-generic',
 ]
 
@@ -183,7 +184,7 @@ export function apply(ctx) {
     const rows = Array.isArray(providers) ? providers : []
     const byId = new Map(rows.map((row) => [row.id ?? row.provider, row]))
     const absent = ROUTES.filter((route) => !byId.has(route))
-    check('十三条 acct-* route 全部注册成 provider', absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
+    check(`${ROUTES.length} 条 acct-* route 全部注册成 provider`, absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
     const named = ROUTES.filter((route) => byId.get(route)?.name)
     check('每条 route 都带显示名', named.length === ROUTES.length, `没有名字的：${ROUTES.filter((r) => !byId.get(r)?.name).join(', ')}`)
 
@@ -200,7 +201,7 @@ export function apply(ctx) {
       if (!Number.isInteger(window) || window <= 0) badMeta.push(`${route}: contextWindow=${JSON.stringify(window)}`)
       if (info?.id !== 'e2e-probe-model' || info?.provider !== route) badMeta.push(`${route}: 回显不对 ${JSON.stringify({ id: info?.id, provider: info?.provider })}`)
     }
-    check('十三个族的模型元数据都是宿主能吃的形状', badMeta.length === 0, badMeta.join(' | '))
+    check(`${ROUTES.length} 个族的模型元数据都是宿主能吃的形状`, badMeta.length === 0, badMeta.join(' | '))
 
     // ------------------------------------------------------------------ 回环数据面
     const api = async (action, body = {}) => {
@@ -566,7 +567,7 @@ export function apply(ctx) {
     const state = await safe(() => api('state'), 'state')
     const stateText = JSON.stringify(state ?? null)
     check('回环 state 不外传凭据', !stateText.includes(KEY), 'state 的 JSON 里出现了假上游的密钥')
-    check('state 里有十三个族', (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
+    check(`state 里有 ${ROUTES.length} 个族`, (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
 
     // ZCode（智谱）专有的一条：它的本机发现**必须说「有凭据但导不进来」**，不能返回空数组。
     //
@@ -587,6 +588,28 @@ export function apply(ctx) {
       `name=${JSON.stringify(zcodeRow?.name)}；discover=${zcodeScanText.slice(0, 300)}`,
     )
 
+    // Raccoon（商汤小浣熊）专有的一条：它的本机发现**必须说「有凭据但导不进来」并列出查过的路径**。
+    //
+    // 为什么值得单独一条：这一族的处境与 ZCode 不同——**连凭据位点都不存在**
+    // （登录态只在客户端进程内存里，退出即失效，磁盘上不落盘）。这种「没有」最容易被写成
+    // 一个空的 `return []`，而 `AGENTS.md` 的硬规矩是「**「读不出来」不等于「没有」**」：
+    // 空数组会让用户以为本族不支持导入，而真相是**这一族本机压根没有可导入的东西**，
+    // 且它只有「粘贴 access_token」这一条登录路。
+    // 断言的是「如实报告」而不是具体文案（改 reason 的措辞不会让它假失败）。
+    const raccoonRow = byId.get('acct-raccoon')
+    const raccoonScan = await safe(() => discover?.execute?.({ family: 'raccoon' }), 'discover(raccoon)')
+    const raccoonScanText = typeof raccoonScan === 'string' ? raccoonScan : String(raccoonScan?.content?.[0]?.text ?? raccoonScan ?? '')
+    check(
+      'Raccoon 的显示名与本机发现都如实报告',
+      String(raccoonRow?.name ?? '').includes('Raccoon') &&
+        raccoonScanText.includes('raccoon') &&
+        /有凭据但导不进来|importable/i.test(raccoonScanText) &&
+        // 「查过哪些路径」必须真的出现在报告里：只说「没有」而说不出查过哪里，
+        // 用户没法复核我们是不是查错了地方（这一族唯一的可复核证据就是这份路径清单）。
+        /\.raccoon/.test(raccoonScanText),
+      `name=${JSON.stringify(raccoonRow?.name)}；discover=${raccoonScanText.slice(0, 300)}`,
+    )
+
     // 两个腾讯变体必须**看着就是两个东西**：它们共用同一份凭据文件与同一条线协议
     // （`families/workbuddy.js` 的工厂 + 两份产品描述符），所以「显示名撞了」
     // 或「只注册进来一个」是这两族最容易出的错，而它在上一条计数检查里看不见
@@ -596,6 +619,32 @@ export function apply(ctx) {
       '两个腾讯变体（WorkBuddy / CodeBuddy）是两条独立且有各自名字的 provider',
       variantNames[0].includes('WorkBuddy') && variantNames[1].includes('CodeBuddy') && variantNames[0] !== variantNames[1],
       JSON.stringify(variantNames),
+    )
+
+    // `discover` 的 `family` 参数必须真的管用，**而且写错名字时要说话**。
+    //
+    // 为什么值得两条：工具从前在「只报告」模式下**完全忽略** `args.family`，于是
+    // `family: 'codex'` 会把每一族都扫一遍。那种输出看起来完全正常（它确实在报告本机的
+    // 发现），用户只会以为「我想看的这一族本机没有可导入的账号」——而真相是那个参数根本
+    // 没被读。写错族名更糟：静默扫全部，用户连自己拼错了都不知道。
+    const scanTextOf = (value) => (typeof value === 'string' ? value : String(value?.content?.[0]?.text ?? value ?? ''))
+    const bogusScan = scanTextOf(await safe(() => discover?.execute?.({ family: 'no-such-family' }), 'discover(bogus)'))
+    check(
+      'discover 给一个不存在的族名时会说出来，而不是静默扫全部',
+      /没有叫/.test(bogusScan) && /no-such-family/.test(bogusScan) && /codex/.test(bogusScan),
+      bogusScan.slice(0, 240),
+    )
+    const codexScan = scanTextOf(await safe(() => discover?.execute?.({ family: 'codex' }), 'discover(codex)'))
+    const scannedFamilies = new Set(
+      codexScan
+        .split('\n')
+        .filter((line) => line.startsWith('- '))
+        .map((line) => line.slice(2).split('｜')[0].trim()),
+    )
+    check(
+      'discover 带 family 时只报那一族',
+      [...scannedFamilies].every((family) => family === 'codex'),
+      `扫到的族：${[...scannedFamilies].join(', ') || '（无）'}；报告 ${codexScan.slice(0, 200)}`,
     )
 
     const diagnostics = await safe(() => api('diagnostics'), 'diagnostics')
@@ -608,5 +657,49 @@ export function apply(ctx) {
     const e2eAccounts = accounts.filter((account) => String(account.label ?? '').startsWith('e2e-'))
     check('四个 e2e 账号都在池子里', e2eAccounts.length === 4, `实际 ${e2eAccounts.map((a) => a.label).join(', ')}`)
     check('账号行带状态字段', e2eAccounts.every((account) => typeof account.status === 'string'), JSON.stringify(e2eAccounts.map((a) => ({ id: a.id, status: a.status }))))
+
+    // ------------------------------------------------------------------ 出口代理（放在最后：它会让每个账号都暂时用不了）
+    //
+    // 这条检查的判据是反的：**请求成功才是失败**。
+    //
+    // 为什么：账号上写了出口代理，就是要求这个账号的流量从那个出口出去。而 `src/http.js`
+    // 从前在拿不到 `undici` 时只记一句日志，然后每个请求都**悄悄走直连**——用户以为换了
+    // IP，实际带着真实地址出去了，而这一切在成功的响应里完全看不出来。现在它抛
+    // `PROXY_UNAVAILABLE`，于是「配了一个打不通的代理 ⇒ 请求必须失败」就成了可断言的形状：
+    // 要是在这儿拿到 PONG，说明又回到了静默走直连。
+    //
+    // 四个账号全配上：池子会换号，只给一个账号配的话下一个候选就把它救回来了。
+    // 代理填 `127.0.0.1:9`（discard 端口，本机不会有人监听）。
+    //
+    // **判据不能只是「这次请求失败了」**：四个账号都可能在前面那些故障检查里带着冷却，
+    // 那时请求会以「没有可用账号」失败——看起来是红的，实际什么都没验。所以这里做三件事：
+    // ① 先把全部冷却解掉并把假上游的请求账本清空；② 配代理；③ 断言请求**一个字节都没到上游**
+    // （`/__requests` 的计数仍是 0），并且失败不是「没有可用账号」那种空响。
+    // 静默走直连时，假上游一定会收到那一笔 ⇒ 计数变成 1 ⇒ 这条立刻红。
+    await safe(() => api('unfreeze', {}), 'unfreeze')
+    await safe(
+      () => fetch(`${BASE}/__requests`, { method: 'DELETE' }).then((response) => response.json()),
+      'mock:clear',
+    )
+    for (const account of e2eAccounts) {
+      await safe(() => api('proxy', { account: account.id, proxy: 'http://127.0.0.1:9' }), `proxy(${account.id})`)
+    }
+    const viaDeadProxy = await infer('mock-alpha', 'e2e-proxy')
+    const seenByMock = await safe(
+      () => fetch(`${BASE}/__requests`).then((response) => response.json()),
+      'mock:requests',
+    )
+    const failureText = String(viaDeadProxy.failure?.message ?? '')
+    check(
+      '四个账号都配了打不通的代理时：请求失败，而且**一个字节都没到上游**（成功就等于静默走直连）',
+      viaDeadProxy.text !== 'PONG'
+        && Number(seenByMock?.count ?? -1) === 0
+        && !/no account could serve/i.test(failureText),
+      `text=${JSON.stringify(viaDeadProxy.text)}；失败=${failureText || '（无）'}；上游收到 ${seenByMock?.count} 笔`,
+    )
+    for (const account of e2eAccounts) {
+      await safe(() => api('proxy', { account: account.id, proxy: '' }), `proxy-clear(${account.id})`)
+    }
+    await safe(() => api('unfreeze', {}), 'unfreeze-after')
   }
 }

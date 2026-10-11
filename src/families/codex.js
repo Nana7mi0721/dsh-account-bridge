@@ -311,7 +311,7 @@ export const codexFamily = {
       RESPONSES_URL,
       {
         method: 'POST',
-        headers: requestHeaders(payload.auth ?? {}, ctx, { json: true, stream: true }),
+        headers: requestHeaders(payload.auth ?? {}, ctx, { json: true, stream: true, sessionId: cacheKey }),
         body: JSON.stringify(body),
         signal,
       },
@@ -346,8 +346,15 @@ function authorizeUrl(redirectUri, pkce, state) {
   return url.toString()
 }
 
-/** 授权码换令牌。 */
-async function exchangeCode(ctx, code, verifier, redirectUri, signal, proxy) {
+/**
+ * 授权码换令牌。
+ *
+ * 这次请求**没有**账号级代理可走，而且这不是遗漏：代理是按账号存的（`payload.proxy`），
+ * 换令牌时账号还不存在。所以登录这一步一律走直连；需要代理才能到 `auth.openai.com` 的用户
+ * 得在系统层面配。（从前这里留着一个 `proxy` 形参，但唯一的调用点从来没传过它——
+ * 一个永远为 `undefined` 的参数比没有参数更容易让人以为「代理已经接上了」。）
+ */
+async function exchangeCode(ctx, code, verifier, redirectUri, signal) {
   const response = await ctx.fetch(
     TOKEN_URL,
     {
@@ -362,7 +369,6 @@ async function exchangeCode(ctx, code, verifier, redirectUri, signal, proxy) {
       }),
       signal,
     },
-    proxy,
   )
   const text = await response.text()
   const json = tryJson(text)
@@ -408,12 +414,17 @@ function claimsEmail(claims) {
 }
 
 /** 上游请求头。 */
-function requestHeaders(auth, ctx, { json = false, stream = false } = {}) {
+function requestHeaders(auth, ctx, { json = false, stream = false, sessionId } = {}) {
   const headers = {
     accept: stream ? 'text/event-stream' : 'application/json',
     originator: ORIGINATOR,
     version: resolveCliVersion(ctx, 'codex'),
-    'session-id': randomId(16).replace(/-/g, '').slice(0, 36),
+    // `session-id` 必须**跨请求稳定**：Codex CLI 是「一个会话一个 id」，上游拿它给缓存与
+    // 遥测分组。从前这里是每次现摇一个 `randomId(...)`，也就是**每个请求都是新会话**——
+    // 同一段对话反复回来，上游每次当第一次见。现在与 `prompt_cache_key` 同源（按账号 +
+    // 会话派生，见 `src/wire/identity.js`）；目录与额度这类不属于任何一次对话的请求拿不到
+    // 会话，那时摇一个新的无所谓（没有对话可归类）。
+    'session-id': sessionId ?? randomId(16).replace(/-/g, '').slice(0, 36),
   }
   if (json) headers['content-type'] = 'application/json'
   if (typeof auth.access === 'string') headers.authorization = `Bearer ${auth.access}`

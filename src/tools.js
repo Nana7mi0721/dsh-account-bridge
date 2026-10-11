@@ -126,17 +126,29 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
     name: 'account_bridge_discover',
     description:
       'Scan this machine for client logins that the account-bridge plugin could import, WITHOUT signing anything in: ' +
-      'reads the credential files left behind by the Codex CLI, Claude Code, the agy CLI, and reports which of them ' +
-      'are usable. Also reports credential sites whose family is not implemented yet, so you can tell the human ' +
-      'what is not covered instead of guessing. Pass import:true to actually adopt every importable account.',
+      'reads the credential sites every implemented family knows about and reports which of them are usable, and ' +
+      'for the rest says why not (no client installed / no credentials there / credentials are encrypted / the ' +
+      'family has no local login at all) — so you can tell the human what is not covered instead of guessing. ' +
+      'Pass import:true to actually adopt every importable account.',
     parameters: compileParameters({
-      family: { type: 'string', description: 'Only look at this family. Omit to scan every family.' },
+      family: { type: 'string', description: 'Only look at this family (id, e.g. "codex"). Omit to scan every family.' },
       import: { type: 'boolean', description: 'Adopt the importable accounts found (default false = report only).' },
     }),
     output: textOutput(),
     async execute(args) {
       try {
-        const scan = await discoverLocalAccounts({ families, store, ctx, log })
+        const only = typeof args.family === 'string' && args.family !== '' ? args.family : undefined
+        if (only !== undefined && !families.some((family) => family.id === only)) {
+          // 族名写错时**不能**静默扫全部：那会让人以为「这一族本机没有可导入的账号」，
+          // 而他只是拼错了名字。可选的族名直接列出来。
+          return `没有叫 \`${only}\` 的族。可选的族：${families.map((family) => family.id).join(' / ')}。`
+        }
+        const scan = await discoverLocalAccounts({
+          families: only === undefined ? families : families.filter((family) => family.id === only),
+          store,
+          ctx,
+          log,
+        })
         if (args.import !== true) {
           const extra = scan.importable.some((entry) => !entry.alreadyImported)
             ? ['想全部收下就再调一次本工具并带 `import: true`。']
@@ -144,7 +156,7 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
           return renderScan(scan, extra)
         }
 
-        const result = await importDiscovered({ families, store, scan, family: args.family, adapter })
+        const result = await importDiscovered({ families, store, scan, family: only, adapter })
 
         // 这次扫描发生在导入**之前**，所以刚收下的那些此刻还挂在「可以导入」里。
         // 不把它们挪走的话，输出会自相矛盾：上面说「可以导入 1 个」，下面说「已导入 1 个」。
@@ -248,6 +260,12 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
         if (!account) return `没有账号 "${args.account}"。`
         await store.remove(args.account)
         adapter.invalidate(account.family)
+        // 账号 id 会**回收**（`codex-1` 删掉之后会被下一个账号拿到），所以指向它的记录必须
+        // 跟它一起走：粘性记录会让新账号被当成旧账号的替身去答同一个会话，冷却会让新账号
+        // 继承一笔它没犯过的错。HTTP 面（`src/api.js` 的 `remove`）一直是这么做的，工具面
+        // 从前只清了目录缓存——同一件事两条面做得不一样，正是这类 bug 最常见的来路。
+        adapter.forgetAccount?.(args.account)
+        adapter.unfreeze(account.family, args.account)
         return `已删除账号 ${args.account}（仅本地记录）。`
       } catch (error) {
         return `删除失败：${String(error?.message ?? error)}`

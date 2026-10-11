@@ -38,6 +38,11 @@ export { failureWords }
  */
 export const MODEL_SCOPED_QUOTA_FAMILIES = new Set(['claude', 'agy'])
 
+// **不在这个集合里也是有话要说的**：ZCode（`zcode`）的额度是按**账号**算的——两条通道
+// 共用同一份积分，某个模型吃满不影响别的模型的额度这种事在它身上不成立；把它加进来会让
+// 「积分用尽」只停一格，于是池子会拿着同一份已经空了的积分去试下一个模型。别为了
+// 「看起来和 claude / agy 对称」把它加进来。
+
 const MINUTE = 60_000
 const HOUR = 60 * MINUTE
 
@@ -144,9 +149,25 @@ export function classifyFailure(error, family, facts = {}) {
     // 同一订阅下别的账号可能还能服务这个模型
     return { action: 'switch', reason: `HTTP_${status}` }
   }
-  if (code === 'CONTEXT_WINDOW_EXCEEDED' || status === 400 || status === 422) {
-    // 请求本身的问题：换号也一样失败，且**不惩罚任何账号**
+  if (
+    code === 'INVALID_REQUEST'
+    || code === 'CONTEXT_WINDOW_EXCEEDED'
+    || status === 400
+    || status === 422
+  ) {
+    // 请求本身的问题：换号也一样失败，且**不惩罚任何账号**。
+    //
+    // `INVALID_REQUEST` 通常根本没有 HTTP 状态码——它是我们自己判出来的（模型不属于这条
+    // 通道、参数组合不成立、令牌形状就不对……）。它落在最后那条兜底里也能得到同样的结果，
+    // 但那是**碰巧**：兜底分支的契约是「不认识的失败都别乱罚」，一旦哪天它改成罚账号，
+    // 这里就会跟着静默变味。显式列出来，让「请求的问题不罚账号」成为一条能读到的规则。
     return { action: 'throw', reason: code ?? `HTTP_${status}` }
+  }
+  if (code === 'PROXY_UNAVAILABLE') {
+    // 本机配置的问题，不是账号的错：这个账号配了出口代理，而代理用不了（`src/http.js`
+    // 拒绝在拿不到 undici 时悄悄走直连）。**一次请求都没发出去**，所以不停它；也不换号——
+    // 别的账号也许能用，但那要靠用户去改配置，不是靠我们多试几个把请求发出去。
+    return { action: 'throw', reason: code }
   }
   if (status !== undefined && status >= 500) {
     return {

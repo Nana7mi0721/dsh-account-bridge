@@ -522,12 +522,18 @@ export function registerAccountBridgeRoutes(options) {
     /** 解冻：清掉一个账号（或全族）的冷却，不改凭据。 */
     async unfreeze(body) {
       if (body.account === undefined) {
+        // 从前这条分支只做了一次 `invalidateHealth()`（= 让候选人重新装配），**一条冷却都
+        // 没清**——按钮按下去了、回话也说「已解冻」，冷却是原来的冷却。命令面
+        // （`/pool unfreeze`，`src/commands.js`）一直是对的那一份（它逐个族调 `adapter.unfreeze`），
+        // 两条面做同一件事却一条真一条假，正是「说了但没做」这类 bug 的常见来路。
+        let removed = 0
+        for (const family of families) removed += adapter.unfreeze(family.id) ?? 0
         adapter.invalidateHealth()
-        return { unfrozen: '*' }
+        return { unfrozen: '*', removed }
       }
       const { family, account } = await locate(body.account)
-      adapter.invalidateHealth()
-      return { unfrozen: account.id, family: family.id }
+      const removed = adapter.unfreeze(family.id, account.id) ?? 0
+      return { unfrozen: account.id, family: family.id, removed }
     },
   }
 

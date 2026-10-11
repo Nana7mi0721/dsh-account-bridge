@@ -141,7 +141,14 @@ export class Gate {
     if (afterMs > bound) {
       return { turnedAway: turnedAway(who, limit, afterMs, bound, 'rpm') }
     }
-    times.push(at)
+    // 这个列表**必须保持升序**，上面那句 `times[times.length - limit]` 是直接当下标用的。
+    // 从前这里是 `times.push(at)`——在「限额被调大」之后就不成立了：`limit` 从 1 改成 5 时，
+    // 窗口里可能已经躺着两个未来的占位（`t0`、`t0+60s`），而新的一次 `at = now` 落在它们
+    // **之前**，push 进去就把顺序破坏了；此后 `length - limit` 指到的是另一个占位，
+    // 于是一次本该等到一分钟后的请求拿到「现在就走」。插到该在的位置上，成本是一次线性扫描。
+    const index = times.findIndex((time) => time > at)
+    if (index === -1) times.push(at)
+    else times.splice(index, 0, at)
     this.#rpm.set(who, times)
     return { at, afterMs }
   }
