@@ -4,10 +4,11 @@
 CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
 而不是每家用一个插件。
 
-> 状态：**P6 完成**——骨架 + 14 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
-> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `raccoon` / `generic`）+
+> 状态：**P6 完成**——骨架 + 15 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `raccoon` /
+> `codearts` / `generic`）+
 > 本机账号统一发现 +
-> 设置页账号池面板 + `/pool` 命令族。14 条 route 已在真实 DSH 宿主里验证可见
+> 设置页账号池面板 + `/pool` 命令族。15 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
 > **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
@@ -83,6 +84,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 CodeBuddy（腾讯，中国版）家族注册成 provider route（`acct-codebuddy`，显示名 `CodeBuddy（腾讯）`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的只有「发现」这一半：本机那份 5.6 密文凭据被它按文件里的 `auth.domain` 认成自己的（`www.codebuddy.cn`），并被如实报成「密文，请改用手动粘贴令牌」。**没有可用的明文令牌，一次真实推理都没跑过** |
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
 | 把 Raccoon（商汤小浣熊）家族注册成 provider route（`acct-raccoon`，显示名 `Raccoon (商汤)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 Raccoon Work 客户端，也没有账号**）。真机验到的是**上游那一侧**：五个端点都活着（`chat/completions` / `model_catalog` / `user_info` / `points/balance` / `auth/refresh`），并用**明显无效的令牌**捕获了真实错误形状（401 是 `{"code":200003,"message":"authorization_verify_error",…}`，不带认证头是 `200001 authorization_empty_error`，`refresh` 用坏令牌是 `400 100002 params_invalid_error`）——三条都证明认证头确实是 `Authorization: Bearer` |
+| 把 CodeArts（华为云）家族注册成 provider route（`acct-codearts`，显示名 `CodeArts (华为云)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 CodeArts 客户端，也没有华为云账号**：`~/.codearts`、`~/.cache/deveco`、JetBrains 的 `AppData` 目录一个都不存在）。真机验到的是**上游那一侧**：四个端点都活着（`/api/v2/chat/completions`、`/v1/model/builtin`、`/api/v1/queue/status`、`/snap-manager/v1/statistics/plugin`），并用**明显无效的凭据**捕获了真实错误信封（无认证头是 `401 {"error_msg":"Incorrect IAM authentication information: x-auth-token not found","error_code":"APIG.0301",…}`，空 `Authorization` 是 `401 …error authorization header: failed parse aksk format…`，伪造签名是 **`400`** `{"error_msg":"Bad request: invalid token format","error_code":"APIG.0602",…}`，第三轮同一形状又抓到 **`503`** `{"error_msg":"The IAM service is currently unavailable: system error","error_code":"APIG.0613",…}`）——四条都证明这条线确实要 `SDK-HMAC-SHA256` 签名，且**带签名的请求真的会走进验签流程**（不带签名在网关本地就被拒）。⚠️ 签名**没在真机上验过**（无效凭据走不到验签那一步） |
 | **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
 | **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
@@ -182,7 +184,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
 
 **卡片摘要怎么落到我们的 provider 上**：那是 keyed 席位，key 是该 provider 的 `settingsNs`。
-我们的 14 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
+我们的 15 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
 `joinProviderDirectory()` 给这类 provider 填的 `settingsNs` 就是**空字符串**，
 所以用 `key: ''` 注册一条就能落到所有这些卡片上——组件内部再按 route 过滤，
 别人的卡片一律返回 `null`。
@@ -505,6 +507,7 @@ src/
     trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
     zcode.js          ZCode（智谱）两条通道：端点/凭据分派 + 官方身份块 + 3012 风控识别
     raccoon.js        Raccoon（商汤小浣熊）纯协议层：信封/目录归一 + 积分投影（SSE 复用 chat-completions）
+    codearts.js       CodeArts（华为云）纯协议层：SDK-HMAC-SHA256 签名 + 两处目录合并 + 积分 metric（SSE 复用 chat-completions）
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
     failure-words.js  失败词表：同一个 429 的两条路说同一句话（见「设计要点」）
     diagnostics.js    翻译层的结构化诊断（只上报不抛错，有界、去噪、去重）
@@ -523,6 +526,7 @@ src/
     trae.js           Trae 族（私有协议；凭据只读，不写回）
     zcode.js          ZCode（智谱）族（两条通道二选一；凭据只粘贴，不解密磁盘密文）
     raccoon.js        Raccoon（商汤小浣熊）族（凭证只粘贴；目录失败回落兜底表；不实现领取）
+    codearts.js       CodeArts（华为云）族（凭证只粘贴三件套；**不能续期**，`refresh` 是刻意的 no-op；benefit 头两次尝试）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
@@ -740,7 +744,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   | 事实 | 后果 |
   |---|---|
   | `assembled()` 拿 `envelope.blocks.length` 与**它自己见过的块数**对一下，对不上就**整个信封丢掉** | `blocks` 必须与流里**出现过的**块一一对齐，而且是「见过的顺序」不是「留下的顺序」——`max-tokens` 会丢掉工具调用块，那时宿主**按同样的位置**过滤信封，我们照样得为被丢掉的块留一个占位 |
-  | 我们 14 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
+  | 我们 15 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
   | 签名是**某一个账号**签的 | 回放只给**第一个**候选（`replay: this.#replay && index === 0`）。换号之后把上一家签的东西发给下一家，是既没验过也不该发生的事——上游会拒，而我们无从分辨那是「格式不对」还是「这不是你签的」 |
   | **读不懂就是没有**，绝不抛错 | 版本不认识、模型换了、块数不齐、类型对不上——统统一声不响地降级成「不带这个状态」。宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400 |
 
@@ -998,6 +1002,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 | `trae` | `acct-trae` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有任何 Trae 账号） |
 | `zcode` | `acct-zcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的是：两条通道都活着且可达、无凭据时 401 的形状（两通道不同）、本机 ZCode 客户端的 6 条凭据**全是 `enc:v1:` 密文**（见下） |
 | `raccoon` | `acct-raccoon` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装客户端、没有账号）。真机验到的是：五个端点都活着、三条真实错误形状已捕获（`200003` / `200001` / `100002`）、认证头确实是 `Authorization: Bearer`；本机发现如实报「没有可导入的凭据位点」并列出查过的路径（见下） |
+| `codearts` | `acct-codearts` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装客户端、没有华为云账号）。真机验到的是：四个端点都活着、四条真实错误信封已捕获（`APIG.0301` 无头 / `APIG.0301` 空 `Authorization` / **`APIG.0602` 走 HTTP 400** / **`APIG.0613` 走 HTTP 503**）、`POST …/queue/status` 回 `404 APIG.0101`（证明它只收 GET）；本机发现如实报「有凭据但导不进来」并**在 reason 里逐条列出查过的两个位点**（含它们各自是什么、在不在——「在不在」是真查的，不是抄来的常量）；**签名本身未验**（真机验不到，见下）；**benefit 两次尝试只做了离线 mock 验证**（21 项断言绿，真机未验）；凭据是**临时**的且**不能续期**（`refresh` 是刻意的 no-op，见下） |
 
 **明确不做的族，以及为什么**：
 
@@ -1145,6 +1150,147 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 - **只有证据、没有真机（全是 `source` 强度）**：真的能推理、模型目录的真实内容、
   `points/balance` 的真实字段、`refresh` 真的能换到新令牌、图片能力、思考开关的实际效果。
   **这六项一条都没有本仓的抓包**，全部来自 `temp/codearts` 的自测记录。
+
+**`codearts` 族（华为云）的取舍，以及它为什么**不能**续期（那个刻意的 no-op `refresh`）**：
+
+- **凭据是华为云临时凭据（STS 三件套），而且没有 `refresh_token`。**
+  三个值 `access_key_id` / `secret_access_key` / `security_token` **缺一不可**：
+  少任何一个，`Authorization` 头里的 `SignedHeaders` 都会与网关算出来的不一致。
+  过期之后**只能重新登录**（参考实现的续期是重走一遍浏览器登录，本仓没有那条通道）。
+- **所以本族有一个 `refresh`，但它是刻意的 no-op**（与 `zcode` / `commandcode` 同款）：
+  它不换凭据，只把白名单里的键原样返回。**存在的唯一理由**是账号卡片的「刷新」按钮走
+  `src/pool.js` 的 `family.refresh(...)`，而**那一行没有可选链**——省略了，用户点到的
+  就是一个 TypeError，而不是一句人话。缺件时它如实抛 `MISSING_CREDENTIAL`
+  （与 `stream()` 同一句话），不假装续期成功。⚠ 它**返回新的 auth 对象**：池子做浅合并
+  `{...current.auth, ...returned}`，返回 `{}` 会把凭据从记录里**抹掉**。
+- ⚠ **代价说清楚**：池子对**这一族仍然没有真正的续期能力**。凭据一过期，本族只能靠换号撑；
+  池里只有一个 CodeArts 账号时，那一个过期就等于这一族不可用。
+- ⚠ **配套的一条同样反直觉**：`needsRefresh()` **恒返回 `false`**，而且**不能**改成
+  「按 `expires_at` 提前提醒」。池子那边只要 `needsRefresh` 为真就会去
+  `refreshAccount()`，而本族的 `refresh` 是 no-op ⇒ 返回的 auth 与原样一样 ⇒
+  `expires_at` 不变 ⇒ 下一次请求又为真 ⇒ **每个请求都白跑一次刷新**
+  （顺带 `#catalogs.delete()`，把两处目录端点一起重新打）。
+  **提醒不会因此丢掉**：面板的有效期与「已过期」红字读的是凭据里的**数字** `expiresAt`
+  （`src/api.js` 的 `publicAccount()` 只认 `Number.isFinite`），`authFromPayload` 会把
+  上游给的字符串 `expires_at` 归一成它；真过期时上游还给 `401 APIG.0301`，
+  本族归 `AUTH` ⇒ 换号 + 长冷却，那才是「该重新登录了」的真实信号。
+  这与 `zcode` / `trae` / `commandcode` 三族的决定一致：**不能续期的族不得声称需要续期**。
+  ⚠ 用户从粘贴路进来时 `expires_at` 本来就是**未知**的（三件套里没有这个字段），
+  本族**不编**（参考实现在这里回落 `+24h`，那是它自己的估计值）——解析不出来就不写
+  `expiresAt`，面板上也就不会显示一个凭空来的过期时刻。
+- **登录只做 `paste`，`browser` 故意不做。** 参考实现有完整的浏览器登录（登录票据 + 轮询、
+  DPoP/PKCE），但本仓要落地它得先有两样本仓没有的东西：一个能用 `crypto.subtle` 做椭圆曲线
+  签名的 DPoP 密钥对（零新依赖下要另写一大段），以及一条**在真实浏览器里**完成华为认证页
+  跳转的通道（本仓登录面只有 `src/login/broker.js` 那个非交互中介，它只自动回答
+  **单选项 select**，其余一律 `DECLINED`）。**一个半成品的 browser 登录比没有更坏**：
+  用户会点它、会卡在中途，而错误信息说不出为什么。
+  ⚠ 与 raccoon 同一处境：**agent 场景下加不了账号**，只能从设置页进（契约 §4.3）。
+- **benefit 模型要「两次尝试」，两个方向都得有，且都不能算账号失败。** benefit（免费额度）
+  模型（`glm-5.3-flash` / `deepseek-v4.1-flash`）不带 `maas_type: benefit` 会
+  `404 InferHub.002002009.404 "model is not registered"` ⇒ 要**补上**该头重试一次；
+  而账号**没有 benefit 包**时，带上该头的请求会报 **`InferHub.4004.200 benefit not found`**
+  （上游的形态是 **HTTP 200 + SSE**）⇒ 要**去掉**该头重试一次。
+  两个方向是**相反的两个症状**，所以实现是一个三态覆盖（`undefined` = 按目录判 /
+  `true` = 一定带 / `false` = 一定不带）加一个 `tried` 集合，**每个方向各只允许一次、
+  最多两次请求**（防来回弹）。两条重试都发生在**族内部**，**不产生任何失败信号**——
+  走池子的换号解决不了「这个账号没有 benefit 包」，只会把整个池子轮一遍。
+  ⚠ 反方向的坑：`maas_type: benefit` **必须参与签名**（它是纯请求头），而
+  `Agent-Type` / `X-Language` **绝不能参与签名**（参考实现用真实凭据实测过：后置头进了
+  canonical request ⇒ 恒 `401 APIG.0301`）。
+  还有一条**不能靠名字判**：`glm-5.3-flash` 是 benefit，而 `deepseek-v4-flash`
+  （同样以 `-flash` 结尾、同样无 `-0731` 后缀）**不是**——所以判定只认目录，目录读不到
+  才回落到那两个值的静态表。
+  ⚠ **这条状态机是离线 mock 验的，不是真机验的**（本机没有 CodeArts 凭据）：假
+  `ctx.fetch` 喂真实报文形状，21 项断言全绿——404 补头、`4004.200` 去头、
+  「两个方向都失败时恰好两次请求」、两次签名必须不同、后置头不进 `SignedHeaders`。
+  ⚠ **一处已知限制**：SSE 那条通道上，上游把业务码放在**只有业务码的帧**里
+  （`data:{"error_code":"InferHub.4004.200","error_msg":"…"}`，顶层，既没有 `error`
+  也没有 `choices`），而共享翻译层 `src/wire/chat-completions.js` 只认 `payload.error`
+  （全文没有 `error_code` / `error_msg` 这两个词）⇒ 那种帧被当空帧跳过，流读完后以
+  `EMPTY_RESPONSE` 收场，**业务码在那条路上拿不到**。所以「去掉该头重试」这条
+  **只在 HTTP 路径（4xx/5xx 带回包）上自动生效**；SSE 那条路降级成
+  `EMPTY_RESPONSE`，由 `src/health.js` 按 SERVER 处置（换号 + 60 秒 + 罚 member）——
+  对账号是**安全**的（不会被误判成凭据死亡而冷 24 小时），只是这一轮救不回来。
+  这里**刻意不猜**：判据只有一条——错误文本里真的出现业务码 `InferHub.4004.200`
+  （`isBenefitNotFound()` 只认这个码值，不认「benefit not found」这类自然语言），
+  条件不成立就照原样抛出去（mock 测试里 `⑤` 就是钉这条现状的）。
+  给共享层的建议（**本次没改**）：给 `translateChatStream` 加一个可选的「帧级业务码
+  回调」，让各族自己认业务码，而不是每族自己写 SSE 解析。
+- **并发上限（`TM.00001041`）不是账号的错。** CodeArts **按账号**限并发，超了以
+  `TM.00001041` 失败（SSE 里也可能是 `InferHub.ModelArts.81111.429`，TPM 超限）。
+  本仓把它归 **`RATE_LIMIT`（换号 + 5 分钟）**，**不是** `ACCOUNT_QUOTA`（24 小时）：
+  账号是好的，只是此刻轮不到。
+- **`max_tokens` 自己钳到 65536。** 参考实现实测 65536 可用、**131072 触发空流**
+  （上游回 `The request param is invalid`），而 DSH 的 `maxTokens` 是一等构造参数、
+  只校验「正安全整数」、**没有上限**，还会从一个 provider 带到另一个 provider。
+  ⚠ 顺带纠正一处容易张冠李戴的地方：仓库里那张 128000/131072 的表属于
+  buddy/workbuddy，**不是** CodeArts。
+- **思考档位只有「开 / 关」，而且是顶层 `thinking`。** 「关」发
+  `thinking: {type:'disabled'}`（**顶层**，不是 raccoon 那种 `extra_body.thinking`，
+  混用会静默无效），「开」**刻意不发**这个字段（实测「不发」与「显式 enabled」等价，
+  少发一个字段就少一个上游方言变了之后的失败面）。没有强度档，就不假装有。
+- **模型目录读两处并按来源分流。** benefit 模型只在 `opengw…/gateway/config` 那一份里，
+  常规模型只在 `snap-access…/v1/model/builtin` 那一份里；**两处都要**。
+  ⚠ 一个容易写错的判据：一条腿「成没成」看的是**请求成功且形状可识别**，
+  **不是**「解析出了非空列表」——`result.models: []` 是**合法状态**（账号一个 benefit 模型都没有），
+  把它当成失败会让兜底表盖住一份真实的空目录。所以 `parseCodeArtsModels()` 出参里
+  专门带了 `outcome: {gatewayOk, builtinOk}`。
+  ⚠ 另一处：benefit 集合**只记没被归一改写过的 id**——`deepseek-v4-flash-0731` 与
+  `deepseek-v4-flash` 在后端是**两个模型**、benefit 属性相反，把改写后的 id 记进集合
+  会让非 benefit 的那个被带上该头而 404。
+- **图片：本族声明的 `inputModalities` 是 `['text']`，而且**是把视觉模型过滤掉**。**
+  参考实现按 `-VL-` / `-VL` 后缀把视觉模型从目录里**滤除**，本仓照做。
+  这与 raccoon 的处置**相反**（它一律声明 `['text','image']`），理由是**否据的方向不同**：
+  那边远端从不下发模态字段（没有否据 ⇒ 默认「可能支持」，宁可吃一条清楚的 400，
+  也不要图片被静默换成占位符）；这边上游**明确**用型号后缀标记多模态，而 DSH 的对话面
+  走的是文本通道（参考实现也只做文本）。⚠ 这条**本仓真机未验**，是照抄它的处置。
+- **`risk: 'high'`**，三条理由：① **没有续期**，凭据一过期就没有任何自愈路径；
+  ② **真机推理未验**——签名是自己按 `sign.ts` 用 `node:crypto` 重写的 HMAC，
+  写错一个字节就是恒 401，而本仓**验不出来**；③ **凭据形态比别家重**（三件套缺一不可，
+  且来自一次交互式粘贴），抄错任何一个的表现都是 401。
+
+**关于 `codearts` 真机验证到什么程度的一句实话**：本机**没装 CodeArts 客户端、没有华为云账号**
+（`~/.codearts`、`~/.cache/deveco`、`~/AppData/Roaming|Local/Huawei`、JetBrains 的
+`AppData` 与 `~/.config/JetBrains` 一个都不存在），所以**一次推理都没跑过**。
+
+- **真机验到的（`captured`，2026-10-11，两轮一次性探针，只发无效凭据）**：
+  ① 不带任何签名头 `POST /api/v2/chat/completions` → `401 {"error_msg":"Incorrect IAM authentication information: x-auth-token not found","error_code":"APIG.0301","request_id":"e335a619709b0289b6a8a03796d7156d"}`
+  （`server: CW`、`content-type: application/json`）；
+  ② 空 `Authorization` 打同一个端点 → `401 {"error_msg":"Incorrect IAM authentication information: error authorization header: failed parse aksk format:Authorization format is incorrect","error_code":"APIG.0301",…}`；
+  ③ 伪造 AK/SK 的**完整签名**（`SignedHeaders=content-type;host;x-sdk-content-sha256;x-sdk-date;x-security-token`）→ **`400`（不是 401）** `{"error_msg":"Bad request: invalid token format","error_code":"APIG.0602","request_id":"7bf69d2b118b41b7400f00d243822168"}`；
+  ④ `GET /v1/model/builtin` 与 `GET /api/v1/queue/status` 与 `GET /snap-manager/v1/statistics/plugin` 三条不带认证全是 `401 APIG.0301 x-auth-token not found`；带伪签名是 `400 APIG.0602`；
+  ⑤ `GET https://opengw.developer.huaweicloud.com/api/v1/gateway/config` 不带认证也是 `401 {"error_code":"APIG.0301"}`（**同一层网关鉴权，端点活着**）；
+  ⑥ `POST /api/v1/queue/status` → **`404 {"error_msg":"The API does not exist: method POST not found","error_code":"APIG.0101",…}`** ⇒ 那个端点**只收 GET**；
+  ⑦ 第三轮（同日 20:50，三种伪签名形状，全部经本仓的 `signCodeArtsRequest()` 构造）：
+  `GET /v1/model/builtin`（追加后置头 / 不追加后置头）与 `POST /api/v2/chat/completions`
+  **三条全是 `503`** `{"error_msg":"The IAM service is currently unavailable: system error","error_code":"APIG.0613",…}`
+  （`server: CW`；`x-request-id` 分别 `cd837a6b2f7eb3653b9624e5ef6402fe` / `1173f57cd26ec34ad5b3238611434037` / `379ceccbb5d9f98fdac4b54a9e9f07ae`），
+  而**同一时刻**不带签名的同样请求**仍然稳定是 `401 APIG.0301 x-auth-token not found`**
+  （`x-request-id` `9db66559d3db64db6c96160b33fa0e50` / `9725926e92bebabef191cf4698339610` / `9121f4e09ed7a1f6f4651f37d190281e`）。
+  ⇒ **推断**（证据支持的推断，不是已验证的事实）：不带 `Authorization` 的请求在 APIG **本地**就被拒
+  （`APIG.0301`）；带上 `Authorization: SDK-HMAC-SHA256 …` 的请求才会被 APIG 拿去**找 IAM 验签**
+  ——所以 IAM 不可用时网关回的是 `503 APIG.0613`。20:37 同一形状回 `400 APIG.0602`（格式先被拒）、
+  20:50 回 `503 APIG.0613`（进到验签那一步而 IAM 挂了），**两次互相印证了「这个头真的被处理了」**。
+- ⚠ 本轮**最重要的一条新事实**：`APIG.0602` 走的是 **HTTP 400**，而参考实现的 `isAuthError`
+  只看 401/403 ⇒ 本仓的 `classifyCodeArtsFailure()` **把码值判据排在状态码之前**
+  （只按状态码会把它归成 `SERVER` = 换号 + 60 秒冷却，而这个错要做的是**重新登录**）。
+  ⚠ `APIG.0613` 反过来：它是**上游 IAM 挂了**，与账号无关，本仓刻意**不为它加特例**
+  （落到 `mapStatus(503)` ⇒ `SERVER` ⇒ 换号 + 60 秒 + 罚 member，与一次网关抖动相称；
+  `listModels` 那条路只会 `warn` 一句然后回落兜底表）。
+- **本轮证明不了什么（必须写下来，否则下次会有人以为「跑一下就验过了」）**：
+  第二轮的 A–F 六种签名变体（uri 补不补尾部 `/`、`maas_type` 是否参与签名、`Agent-Type`
+  是否参与签名、带不带 `content-type`）**一律回同一个 `APIG.0602`** ——因为 APIG 在**验签之前**
+  先校验 `x-security-token` 的**格式**，而探针发的是 `FAKETOKEN`。⇒
+  **「补尾部斜杠」「头是否参与签名」这两条规则本身，本仓一条都没验到**；
+  ⑦ 能证明「签名头被处理了」，但**证明不了我们的 canonical request 与 string-to-sign 逐字节正确**
+  ——那需要一个真 AK/SK，而真 AK/SK 不存在于本机。三轮合起来只证明了：端点活着、鉴权层在、
+  `x-security-token` 确实被读、`SignedHeaders` 的**格式**被接受（没有任何「签名头格式不对」类抱怨）、
+  **带签名的请求确实会走进验签流程**。
+- **只有证据、没有真机（全是 `source` 强度，出处见 `THIRD_PARTY_NOTICES.md`）**：
+  签名真的能通过、真的能推理、两处目录的真实内容、并发上限的真实报文、
+  积分读数的真实字段、思考开关的实际效果。**这六项一条都没有本仓的抓包**。
+  （第七项「benefit 两次尝试」是**离线 mock 验的**，见上文那一节——它证明的是
+  **我们自己的状态机**对，不是上游真的会那么回；上游那两条报文形状仍然是 `source` 强度。）
 
 ## 未定事项
 

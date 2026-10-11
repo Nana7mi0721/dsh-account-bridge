@@ -36,6 +36,7 @@ const ROUTES = [
   'acct-trae',
   'acct-zcode',
   'acct-raccoon',
+  'acct-codearts',
   'acct-generic',
 ]
 
@@ -608,6 +609,48 @@ export function apply(ctx) {
         // 用户没法复核我们是不是查错了地方（这一族唯一的可复核证据就是这份路径清单）。
         /\.raccoon/.test(raccoonScanText),
       `name=${JSON.stringify(raccoonRow?.name)}；discover=${raccoonScanText.slice(0, 300)}`,
+    )
+
+    // CodeArts（华为云）专有的一条：显示名如实、本机发现**如实说「导不进来」并列出查过的位点**，
+    // 而且它**不能**是一个「有凭据但没实现导入」的假承诺。
+    //
+    // 为什么值得单独一条：这一族的处境是「**唯一的登录路是粘贴三件套**」——
+    // CodeArts 的临时凭据不落在任何固定文件里（参考实现的凭据走它自己的凭据存储），
+    // 本机 2026-10-11 核实 `~/.codearts`、`~/.cache/deveco` 都不存在。
+    // 这种处境最容易被写成两个极端，两个都错：
+    //   ① `return []`（＝「本机没有过 CodeArts」，而真相是**我们压根没有可读的位点**）；
+    //   ② 报 `importable: true`（＝让用户点「导入」，然后因为本族没有
+    //      `recordFromDiscovery` 而失败，`src/discover.js:196` 那条分支）。
+    // 断言的是「如实报告 + 说出查过哪里」，不是具体文案（改 reason 的措辞不会假失败）。
+    const codeartsRow = byId.get('acct-codearts')
+    const codeartsScan = await safe(() => discover?.execute?.({ family: 'codearts' }), 'discover(codearts)')
+    const codeartsScanText =
+      typeof codeartsScan === 'string' ? codeartsScan : String(codeartsScan?.content?.[0]?.text ?? codeartsScan ?? '')
+    check(
+      'CodeArts 的显示名与本机发现都如实报告',
+      String(codeartsRow?.name ?? '').includes('CodeArts') &&
+        codeartsScanText.includes('codearts') &&
+        /有凭据但导不进来|importable/i.test(codeartsScanText) &&
+        // 「查过哪些位点」必须真的出现在报告里：只说「没有」而说不出查过哪里，
+        // 用户没法复核我们是不是查错了地方（这一族唯一的可复核证据就是这份清单）。
+        // 两个位点任一出现即可（`~/.cache/deveco` 的模型目录缓存，或 `~/.codearts`）。
+        /cache[\\/]deveco|\.codearts/.test(codeartsScanText),
+      `name=${JSON.stringify(codeartsRow?.name)}；discover=${codeartsScanText.slice(0, 300)}`,
+    )
+
+    // CodeArts 的第二条：它的登录面**只有粘贴一条路，而且那条路在状态里是可见的**。
+    //
+    // 为什么值得单独一条：本族的 `browser` 登录**故意没做**（要 DPoP/PKCE 签名与真实
+    // 浏览器通道，本仓两样都没有），而 `paste` 是 agent 场景下唯一走得通的路
+    // ——`src/login/broker.js` 只会自动回答单选项 select，其余交互一律 `DECLINED`。
+    // 一个「方法列表是空的」或「方法 id 不是 paste」的族，用户点「+ 添加账号」
+    // 会得到一个什么都不做的按钮，而这件事在别的检查里**完全看不见**。
+    const codeartsStateRow = (state?.families ?? []).find((entry) => entry.family === 'codearts')
+    const codeartsMethodIds = (codeartsStateRow?.loginMethods ?? []).map((method) => method.id)
+    check(
+      'CodeArts 的登录面如实只有 paste 一条路',
+      codeartsMethodIds.includes('paste') && codeartsStateRow?.discoverable === true,
+      `loginMethods=${JSON.stringify(codeartsStateRow?.loginMethods ?? null)}；discoverable=${codeartsStateRow?.discoverable}`,
     )
 
     // 两个腾讯变体必须**看着就是两个东西**：它们共用同一份凭据文件与同一条线协议

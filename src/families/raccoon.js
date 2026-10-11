@@ -75,7 +75,6 @@ import {
   raccoonUserInfoFrom,
   trackRaccoonBalance,
 } from '../wire/raccoon.js'
-import { withSource } from '../util.js'
 
 export const ID = 'raccoon'
 export const ROUTE = 'acct-raccoon'
@@ -221,14 +220,11 @@ export const raccoonFamily = {
     ]
   },
 
-  /**
-   * 发现路径不可导入 ⇒ 本函数**不会**被调用（契约 §4.4：只有 `importable === true`
-   * 且族实现了它才走这条路）。留着它是为了让「本族支持导入」这个判断在代码里可读，
-   * 而不是靠 `src/discover.js` 的隐式行为。
-   */
-  recordFromDiscovery(item) {
-    return withSource(recordFromAuth(item?.auth ?? {}, item?.label, 'client-import', false), item)
-  },
+  // 这里**没有** `recordFromDiscovery`：本族没有任何 `importable: true` 的发现结果
+  // （Raccoon Work 的登录态只在客户端进程内存里，磁盘上不落盘），所以写了也只是一个
+  // 永远不会被调用的空壳。`src/discover.js` 对「有凭据但导不进来」的条目会照常显示
+  // `reason`，用户看到的是「为什么导不进来」，不是一句「这个族不支持导入」的假判断。
+  // 与 `copilot` 族同一个决定。
 
   login: {
     methods: [{ id: 'paste', label: '粘贴 access_token（可选 refresh_token）' }],

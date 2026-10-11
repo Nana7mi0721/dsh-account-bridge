@@ -51,22 +51,31 @@ export function preflight(repo) {
   // 2. 借来的代码必须登记，且登记过的文件要指回台账。许可不同（MIT / Apache-2.0 / AGPL-3.0），
   //    台账是唯一能回答「这一行是从哪来的」的地方。
   const notices = read(join(repo, 'THIRD_PARTY_NOTICES.md'))
-  //    只认**表格行**里的反引号：台账是「借了什么 → 落在哪个文件」的表格，而散文里顺口提
-  //    一句「复用本仓的 `src/wire/chat-completions.js`」不是在主张那个文件是借来的——
-  //    这种句子曾经让一个共享文件被要求加来源标注（真发生过一次），于是只能改措辞绕开。
-  //    现在只把表格行当主张，并把命中行号带进失败信息里（否则报告只说「没有注明来源」）。
+  //    只认**表格行第二列**（表头固定是「用在本仓」）里的反引号。台账的其余列是在描述上游，
+  //    里面顺口提一句「复用本仓的 `src/wire/chat-completions.js`」不是在主张那个文件是借来的。
+  //    这条界线被踩过两次：先是散文里的顺口一提（于是改成只看表格行），再是表格第三列里的
+  //    同样一句（于是收窄到第二列）——两次都是共享文件被要求加一句它并不欠的来源标注。
+  //    命中行号带进失败信息里，否则报告只说「没有注明来源」，还得自己去找是哪一行。
   const listed = notices
     .split('\n')
-    .flatMap((line, index) => (line.trimStart().startsWith('|')
-      ? [...line.matchAll(/`(src\/[^`]+?\.js)`/g)].map((match) => ({ path: match[1], line: index + 1 }))
-      : []))
-  const unmarked = listed.filter((claim) => {
+    .flatMap((line, index) => {
+      if (!line.trimStart().startsWith('|')) return []
+      // 去掉行首与行尾的 `|` 再切：切完第 0 项是「出处」，第 1 项才是「用在本仓」。
+      const lands = line.trim().replace(/^\|/, '').split('|')[1] ?? ''
+      return [...lands.matchAll(/`(src\/[^`]+?\.js)`/g)].map((match) => ({ path: match[1], line: index + 1 }))
+    })
+  //    同一个文件可能被好几行提到（一行一个上游出处），失败信息里按路径去重、保留第一次出现的行号。
+  const unmarked = []
+  const seen = new Set()
+  for (const claim of listed) {
+    if (seen.has(claim.path)) continue
+    seen.add(claim.path)
     try {
-      return !read(join(repo, claim.path)).includes('THIRD_PARTY_NOTICES.md')
+      if (!read(join(repo, claim.path)).includes('THIRD_PARTY_NOTICES.md')) unmarked.push(claim)
     } catch {
-      return true
+      unmarked.push(claim)
     }
-  })
+  }
   checks.push({
     name: '前置：台账里列出的每个文件都指回 THIRD_PARTY_NOTICES.md',
     pass: listed.length > 0 && unmarked.length === 0,

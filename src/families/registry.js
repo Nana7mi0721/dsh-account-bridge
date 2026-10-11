@@ -10,6 +10,7 @@
 import { agyFamily } from './agy.js'
 import { buddyFamily } from './buddy.js'
 import { claudeFamily } from './claude.js'
+import { codeartsFamily } from './codearts.js'
 import { codexFamily } from './codex.js'
 import { commandcodeFamily } from './commandcode.js'
 import { copilotFamily } from './copilot.js'
@@ -46,6 +47,10 @@ export const FAMILIES = [
   zcodeFamily,
   // Raccoon（商汤小浣熊）同理：与 ZCode 无同厂关系，位置只是「出口之前的最后一个具体族」。
   raccoonFamily,
+  // CodeArts（华为云）同理。⚠ 它**不能续期**（临时凭据没有 refresh_token）：
+  // `refresh` 是刻意的 no-op、`needsRefresh` 恒 `false`，这是本族与上面每一族最大的
+  // 差别，见 `families/codearts.js` 的文件头第一节。
+  codeartsFamily,
   genericFamily,
 ]
 
