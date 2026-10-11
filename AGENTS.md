@@ -2,8 +2,9 @@
 
 把**已经登录的订阅账号**池化成 DSH 里的一组 provider。不是「再填一个 API Key」的插件：
 它复用本机客户端的登录态（ChatGPT 订阅、Claude Pro/Max、Antigravity、MiniMax Code、Qoder、
-CodeBuddy、CommandCode、Grok、GitHub Copilot、Trae），加上一个通用兜底族收任意
-OpenAI / Anthropic 兼容端点，一共十二条 `acct-*` route。多个账号同一个账号池，谁坏了换谁。
+WorkBuddy、CodeBuddy、CommandCode、Grok、GitHub Copilot、Trae、z.ai、Raccoon、华为云 CodeArts），
+再加上粘贴 key 的 OpenCode Zen，以及一个收任意 OpenAI / Anthropic 兼容端点的通用兜底族——
+**一共十六个族、十六条 `acct-*` route**。多个账号同一个账号池，谁坏了换谁。
 
 这一份是给在这里写代码的 agent（人和模型都算）看的规矩。读完就能开工；更细的东西在 `docs/`。
 
@@ -83,7 +84,7 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
 | `src/pool.js` | 账号池与适配器：选号、换号、失败归类、额度、冷却、诊断账本 |
 | `src/select.js` / `src/affinity.js` / `src/gate.js` | 按额度排序 / 会话粘性 / 每分钟与并发闸门 |
 | `src/health.js` / `src/wire/failure-words.js` | 失败分类与「两套通道共用一份词表」 |
-| `src/families/*.js` | 十二个族，一族一个文件；`registry.js` 里的顺序就是界面顺序 |
+| `src/families/*.js` | 十六个族，一族一个文件；`registry.js` 里的顺序就是界面顺序 |
 | `src/wire/*.js` | 协议翻译层（Anthropic / Responses / Chat Completions / SSE / 各家的私有信封） |
 | `src/api.js` / `src/tools.js` / `src/commands.js` / `src/client.js` | 回环数据面 / 工具面 / `/pool` 命令 / 设置面板 |
 | `src/login/` | 登录中介与回环回调 |
