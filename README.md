@@ -4,7 +4,7 @@
 CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
 而不是每家用一个插件。
 
-> 状态：**P6 完成**——骨架 + 15 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> 状态：**P7.9**——骨架 + 15 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
 > `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `raccoon` /
 > `codearts` / `generic`）+
 > 本机账号统一发现 +
