@@ -30,8 +30,10 @@ const DEFAULT_FAMILY_TIMEOUT_MS = 15_000
  *
  * **当前是空的**：workbuddy / qoder / commandcode 三个占位都在各自族落地后删掉了
  * （它们现在由族自己的 `discover()` 报，报得比这里细）。留着这个机制是给下一批族用的——
- * 第三档还有 codebuddy / cline / opencode / kiro / devin / factory / zhipu / qwen / mimo /
+ * 第三档还有 codebuddy / cline / kiro / devin / factory / zhipu / qwen / mimo /
  * sensenova / longcat 没写，那时候这张表会重新有内容。
+ * （`opencode` 曾在这个清单里：第 16 族落地后删掉了——现在它由
+ * `src/families/opencode.js` 的 `discover()` 报，报得比这里细。）
  */
 const UNSHIPPED_SITES = []
 

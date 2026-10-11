@@ -46,6 +46,12 @@ const MODELS = [
   // W3 的两条：一个上游说「一周后再来」，一个上游说「余额不足」。
   'mock-429-week',
   'mock-credit',
+  // W3-3：同样是一次限流，但把「等多久」写在**毫秒头**里，而且那个头里写的
+  // **不是数**（`soon`）——真数字在旁边那个 `x-retry-after-ms` 里。有些网关
+  // 就是这么写的。它守的是 `src/wire/http-error.js` 的 `retryAfterMs()`：
+  // 早期实现用 `??` 串联两个头，只看「有没有这个头」不看「它有没有写出一个数」
+  // ⇒ `retry-after-ms: soon` 把后面那个 900000 挡住，整条毫秒路返回 undefined。
+  'mock-429-ms',
   // J1：同一个 403，但**文案说的是钱**。腾讯系实测会这么回（另一个独立实现的取证），
   // 而 403 我们曾经一律当 AUTH ⇒ 好号被停 24 小时、宿主显示成「API 密钥无效」。
   // 它与 `mock-cf-403` 是一对：同样的状态码，区别只在说了什么。
@@ -399,6 +405,21 @@ function awkwardReply(model, response) {
       'content-type': 'application/json',
       'content-length': Buffer.byteLength(text),
       'retry-after': '604800',
+    })
+    response.end(text)
+    return true
+  }
+  // W3-3：`retry-after-ms` 里写的不是数（网关写 `soon` 是常事），真正带数字的是
+  // 旁边的 `x-retry-after-ms`。两个头只认第一个「能读成一个有限正数」的。
+  // 判据落在 e2e 探针里：`providerRetryAfterMs` 必须是那个 900000，
+  // 不是 undefined、也不是我们自己编的默认值。
+  if (model === 'mock-429-ms') {
+    const text = JSON.stringify({ error: { message: 'Rate limit exceeded. Please retry later.' } })
+    response.writeHead(429, {
+      'content-type': 'application/json',
+      'content-length': Buffer.byteLength(text),
+      'retry-after-ms': 'soon',
+      'x-retry-after-ms': '900000',
     })
     response.end(text)
     return true

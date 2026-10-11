@@ -22,12 +22,22 @@ export async function* readSse(response, options = {}) {
   let buffer = ''
   let event = ''
   let data = ''
+  /**
+   * 见过 `data:` 字段没有。
+   *
+   * 用来按规范把多个 `data:` 行用 `\n` 拼接。不能拿「`data` 现在是不是空串」当判据：
+   * `data:\ndata: real` 的第一行值是空串，于是第二行会被当成第一行接上去，得到 `"real"`，
+   * 而规范要求的是 `"\nreal"`（实测过）。下游都是 `JSON.parse`，两种都解析不了，
+   * 所以这是个保真问题——但保真问题会在诊断里变成「上游说了什么」的差异。
+   */
+  let sawData = false
 
   const flush = () => {
     if (data.length === 0 && event.length === 0) return undefined
     const payload = { event: event || 'message', data, raw: data }
     event = ''
     data = ''
+    sawData = false
     return payload
   }
 
@@ -42,7 +52,10 @@ export async function* readSse(response, options = {}) {
     let value = colon === -1 ? '' : line.slice(colon + 1)
     if (value.startsWith(' ')) value = value.slice(1)
     if (field === 'event') event = value
-    else if (field === 'data') data = data.length === 0 ? value : `${data}\n${value}`
+    else if (field === 'data') {
+      data = sawData ? `${data}\n${value}` : value
+      sawData = true
+    }
     return undefined
   }
 
@@ -70,6 +83,11 @@ export async function* readSse(response, options = {}) {
         index = buffer.indexOf('\n')
       }
     }
+    // 解码器的尾巴：`stream: true` 会把一个被截断的多字节字符的残字节留在解码器里，
+    // 少了这一次无参 `decode()` 它们就静默消失（实测：截在半个汉字上时拿到的是
+    // `{"t":"`，而不是带替换字符的那一半）。两种都解析不了，差别在诊断里
+    // 「上游到底说了什么」——而那一句正是排查时要看的东西。
+    buffer += decoder.decode()
     // 流结束：把残留当成最后一批处理（有些上游不发结尾空行）
     if (buffer.length > 0) {
       for (const line of buffer.split('\n')) {

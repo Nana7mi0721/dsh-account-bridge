@@ -45,8 +45,19 @@ export function httpError(response, text, who) {
 export function retryAfterMs(headers) {
   const seconds = Number(headers?.get?.('retry-after'))
   if (Number.isFinite(seconds) && seconds > 0) return seconds * 1000
-  const ms = Number(headers?.get?.('retry-after-ms') ?? headers?.get?.('x-retry-after-ms'))
-  return Number.isFinite(ms) && ms > 0 ? ms : undefined
+  /**
+   * 两个毫秒头都要**各自**看一眼。
+   *
+   * 原来写的是 `Number(get('retry-after-ms') ?? get('x-retry-after-ms'))`：`??` 只看
+   * 「有没有这个头」，不看「这个头有没有写出一个数」。上游只要回一句
+   * `retry-after-ms: soon`（非数字），后面那个真正带数字的 `x-retry-after-ms` 就被挡在
+   * 外面，整条毫秒路变成死代码——而它恰恰是**替**（而不是补）秒级头的那个。
+   */
+  for (const name of ['retry-after-ms', 'x-retry-after-ms']) {
+    const ms = Number(headers?.get?.(name))
+    if (Number.isFinite(ms) && ms > 0) return ms
+  }
+  return undefined
 }
 
 /**

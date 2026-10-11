@@ -4,11 +4,11 @@
 CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
 而不是每家用一个插件。
 
-> 状态：**P7.9**——骨架 + 15 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> 状态：**P7.10**——骨架 + 16 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
 > `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `raccoon` /
-> `codearts` / `generic`）+
+> `codearts` / `opencode` / `generic`）+
 > 本机账号统一发现 +
-> 设置页账号池面板 + `/pool` 命令族。15 条 route 已在真实 DSH 宿主里验证可见
+> 设置页账号池面板 + `/pool` 命令族。16 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
 > **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
@@ -20,6 +20,11 @@ CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一
 > **P7.8 把 P7.5 遗留的六处改了**：代理配了却静默直连、面板的「解冻」是空话、
 > 删账号不清粘性/冷却、`discover` 忽略 `family`、codex 每个请求都是新会话、
 > 流量闸门在限额调大后不再升序（逐条见「设计要点」与《深度改进计划书》§P7.8）。
+> **P7.10 是第 16 族 `opencode`（OpenCode Zen）＋ 四处协议层的保真修复**：`/models` 端点
+> 不鉴权 ⇒ 登录不再拿它假装验过凭据（改成打一次对话请求，见「粘贴一把 key 时，我们**真的**验了它」）；
+> `retry-after-ms` 不是数字时不再挡住 `x-retry-after-ms`（**有**端到端守卫：假上游的 `mock-429-ms`）；
+> SSE 的 `data:` 拼接按规范补前导换行、流结束前收尾解码器（这两处**没有**自动守卫，只有代码注释）；
+> `expiresAt` 认字符串数字（一次性脚本验过，没有常驻守卫）。逐条见《深度改进计划书》§P7.10。
 >
 > 测试：**只有端到端测试**（`test/e2e/`，起假上游 + 起真的无头宿主），
 > 单元测试与回归测试都已删除；规矩写在 [AGENTS.md](AGENTS.md)。
@@ -85,6 +90,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
 | 把 Raccoon（商汤小浣熊）家族注册成 provider route（`acct-raccoon`，显示名 `Raccoon (商汤)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 Raccoon Work 客户端，也没有账号**）。真机验到的是**上游那一侧**：五个端点都活着（`chat/completions` / `model_catalog` / `user_info` / `points/balance` / `auth/refresh`），并用**明显无效的令牌**捕获了真实错误形状（401 是 `{"code":200003,"message":"authorization_verify_error",…}`，不带认证头是 `200001 authorization_empty_error`，`refresh` 用坏令牌是 `400 100002 params_invalid_error`）——三条都证明认证头确实是 `Authorization: Bearer` |
 | 把 CodeArts（华为云）家族注册成 provider route（`acct-codearts`，显示名 `CodeArts (华为云)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 CodeArts 客户端，也没有华为云账号**：`~/.codearts`、`~/.cache/deveco`、JetBrains 的 `AppData` 目录一个都不存在）。真机验到的是**上游那一侧**：四个端点都活着（`/api/v2/chat/completions`、`/v1/model/builtin`、`/api/v1/queue/status`、`/snap-manager/v1/statistics/plugin`），并用**明显无效的凭据**捕获了真实错误信封（无认证头是 `401 {"error_msg":"Incorrect IAM authentication information: x-auth-token not found","error_code":"APIG.0301",…}`，空 `Authorization` 是 `401 …error authorization header: failed parse aksk format…`，伪造签名是 **`400`** `{"error_msg":"Bad request: invalid token format","error_code":"APIG.0602",…}`，第三轮同一形状又抓到 **`503`** `{"error_msg":"The IAM service is currently unavailable: system error","error_code":"APIG.0613",…}`）——四条都证明这条线确实要 `SDK-HMAC-SHA256` 签名，且**带签名的请求真的会走进验签流程**（不带签名在网关本地就被拒）。⚠️ 签名**没在真机上验过**（无效凭据走不到验签那一步） |
+| 把 OpenCode Zen 家族注册成 provider route（`acct-opencode`，显示名 `OpenCode Zen`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机那把 key **没余额**：付费模型一律 `402 Insufficient account funds`，免费模型一律 `403 FreeTierError` ⇒ **这条线上一次真实推理都跑不了**，不是没试）。真机验到的是**上游那一侧**：① 带真 key 的 `GET /zen/v1/models` 回 **13 条**，不带 key 回 **87 条**；② 两种档位的失败信封逐字（`403 FreeTierError` / `402 Insufficient account funds`）；③ 免费档对第三方客户端**整体关闭**；④ 请求形状是**在不花钱的前提下实测**的——这把 key 的每一次请求都会在计费前被拒，所以「`402` = 请求被接受、`400` = 请求形状被拒」可以直接当探针用 |
 | **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
 | **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
@@ -184,7 +190,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
 
 **卡片摘要怎么落到我们的 provider 上**：那是 keyed 席位，key 是该 provider 的 `settingsNs`。
-我们的 15 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
+我们的 16 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
 `joinProviderDirectory()` 给这类 provider 填的 `settingsNs` 就是**空字符串**，
 所以用 `key: ''` 注册一条就能落到所有这些卡片上——组件内部再按 route 过滤，
 别人的卡片一律返回 `null`。
@@ -287,7 +293,7 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
    与其声明式地编一个进度条，不如什么都不报——**报一个假的剩余额度比不报更糟**。
 5. **它对上游的方言做了让步，每一处都是被真机逼出来的**（见下面的验收一节）。
 
-### OpenCode Zen：为什么它是一个预设，而不是一个族
+### OpenCode Zen：从 `generic` 的预设，变成第 16 个族
 
 本机实测（2026 年，HTTP 实测、不是转述）：
 
@@ -302,9 +308,14 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
 真算）与 `x-opencode-session`（造成 `ses_` + 12 位 hex + 14 位 base62 的形状）都补齐了之后**仍然 403** ⇒
 「只能在 OpenCode 客户端里用」这道门**比请求头更深**，本插件进不去。
 
-所以 OpenCode Zen 走的是 `generic` 的预设：它有 key、没有登录态，而它的地址与路径
-（`/models` + `/chat/completions`）和这一族的默认完全吻合。三方客户端能用的是**付费**那条路。
-若哪天需要一条独立的 `acct-opencode` 路由（带 `models.dev` 的能力表与匿名槽），再说。
+
+所以它先是走 `generic` 的预设：有 key、没有登录态，地址与路径（`/models` + `/chat/completions`）和那一族的默认完全吻合。
+
+**后来还是建了 `acct-opencode` 族**（`src/families/opencode.js` + `src/wire/opencode.js`），理由只有一条：`generic` 的预设**结构上做不到**这一族要做的事——
+
+1. **它的能力元数据不在自己的目录里。** 上游 `/zen/v1/models` 的每一条**只有四个字段**（`id` / `object` / `created` / `owned_by`，本仓真机逐字抓到），窗口、模态、思考、工具一样都没有；能力表在第三方 `https://models.dev/api.json` 的 `opencode` 条目里（120 个模型）。`generic` 的预设只能写死一份声明式目录，而**写死的目录会随着上游换模型变成谎话**。这一族改成「**按凭据裁剪后的目录 ∩ 能力表**」，两个上游谁变都不会让它说错。
+2. **免费档必须被识别出来并滤掉**（见下一节的「为什么不放在选择器里」），而「免费」这件事**只有 models.dev 的 `cost` 字段说得清**——上游目录里连价格都没有。
+3. 匿名槽（`Bearer public`）**不做**：免费档对第三方客户端是关着的，开一个只会回 `403` 的槽等于给用户一个必然失败的选项。那条 `public` 目录反而**不能**当凭据（87 条里大部分是这把 key 无权用的）。
 
 ### 验收方式：拿一个插件写代码时不知道其存在的端点
 
@@ -327,6 +338,68 @@ LIVE generic Anthropic 方言 + 声明式目录 (declared-only) chunk count = 8 
 
 `mock-image-only`（只出图的模型）**没有**进选择器，这是有意的；`declared-only` 只存在于
 手填的声明式目录里，上游 `/models` 从不返回它，它照样能推理。
+
+### 本仓唯一一个 key 级的族，为什么还是做了
+
+`acct-opencode` 是本仓**唯一一个不是「账号级」的族**：其余十五族复用的都是一份**登录态**
+（订阅额度、OAuth 会话、桌面端凭据文件），而这一族收的就是**一把静态 API key**。
+README 开头那句「key 级接入不是本插件要做的事」在这一族上**是有例外的**，理由必须写清楚，
+否则下一个人会问「既然能收 key，那为什么不做 OpenRouter / DeepSeek」：
+
+- **例外不是「它能用 key」，而是「它用 key 也拿不到一件东西」。** 别的 key 级端点（OpenRouter、
+  DeepSeek、Moonshot…）宿主内置的 `llm-pi-ai` 已经接完了，本插件再包一层只会多一个需要维护的壳。
+  OpenCode Zen 不同：**它的能力元数据不在自己的目录里**。上游 `/zen/v1/models` 每条只有
+  `id` / `object` / `created` / `owned_by` 四个字段（本仓真机逐字抓到），窗口多大、收不收图、
+  能不能调工具，一样都没有。这一族要做的正是把
+  **「按这把 key 裁剪过的目录」∩「models.dev 的能力表」** 拼出来——这件事
+  `generic` 的预设结构上做不到（它只能写死一份声明式目录，而上游换模型时那份目录会变成谎话）。
+- **它仍然进统一账号池。** 多账号、冷却、按账号出口代理、额度面板、与其它族一致的失败分类，
+  一样都不少。池子对「没有 `refresh` 的族」有守卫（`src/pool.js` 的 `NO_REFRESH`），
+  所以省掉 `refresh` 是安全的，不是漏写。
+- **它没有 `refresh`，也没有 `needsRefresh`。** key 不过期，所以没有「续期」这件事，
+  也不会有任何写回本机的行为。**本仓无 `refresh` 的族一共三个**：`agy`（令牌由它自己的 CLI 管）、
+  `generic`（key 级）、`opencode`（key 级）。
+
+### 免费档为什么不在选择器里
+
+`models.dev` 的 `opencode` 条目里，**120 个模型有 38 个 `cost.input === 0 && cost.output === 0`**；
+本机这把 key 授权的 13 个里有 8 个是免费档（7 个靠 cost 判据、第 8 个 `jev-1.13-free` 在 models.dev 里
+**根本没有条目**，只有 `-free` 后缀这一条证据）。这一族**默认把它们从选择器里滤掉**，理由是实测的：
+
+- **第三方客户端用不了免费档。** `POST /zen/v1/chat/completions` 打任何 `-free` 模型都是
+  `403 {"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}`
+  ——带不带 key、带不带官方 CLI 的指纹头，都是这一个信封。把一个选上必然 403 的模型列进选择器，
+  等于把「这条线坏了」做成用户的第一印象。
+- **滤掉用 cost 判据，不用 id 后缀。** 后缀只是**辅助**证据：`grok-code` 与 `big-pickle` 的
+  `cost` 全是 0 却**不带** `-free` 后缀，而 `jev-1.13-free` 带后缀却**不在** models.dev 里。
+  两条判据缺一条都会有漏网的。
+- **滤掉只发生在「给用户看的目录」上。** `resolveModel` 查的是**未滤**的那一份，
+  所以别人（或别的插件）已经把免费模型 id 写进配置时，我们仍能给出**正确的**元数据，
+  而不是「查不到 ⇒ 编一个默认值」。
+- **这不是「跳过」，是明面取舍。** 免费档失败会被归成 `INVALID_REQUEST`（`src/wire/opencode.js`
+  的 `OPENCODE_ERROR_TYPES.freeTier`）：**不换号、不罚账号**。按状态码 403 走的话会落到 `AUTH`，
+  那会给一个**完全健康的账号**扣 24 小时冷却——这正是这一族必须自己写 `classifyOpencodeFailure` 的原因。
+
+### 粘贴一把 key 时，我们**真的**验了它（而不是拿 `/models` 假装验过）
+
+`acct-opencode` 的 `paste` 登录会做一次**对话请求**来判凭据，判据是上游自己给的 `error.type`：
+
+| 上游的答复 | 结论 | 为什么 |
+| --- | --- | --- |
+| `401 AuthError`（`Invalid API key.` / `Missing API key.`） | **拒绝** | 这才是「不是凭据」 |
+| `402 Insufficient account funds` | 接受 | 它证明这把 key **过了鉴权**，只是账户没钱 |
+| `403 FreeTierError` | 接受 | 门认了这把钥匙，只是免费档不对第三方开放 |
+| `2xx` | 接受 | 它真的答了话 |
+| 其它非 2xx / 连不上 | 接受但标「未经验证」 | **别把「我们没验成功」说成「你的 key 不行」** |
+
+⚠ 判据**不能**拿 `GET /zen/v1/models` 来做，虽然它看起来最像「检查凭据」的那个端点：**它不鉴权**——
+不带 `Authorization`、带乱写的 key 都回 `200`（87 条），只有带**上游认得的** key 才回被裁剪过的 13 条。
+拿它当门槛的后果是**假验证**：乱写的 key 也被判成合格，用户看到「密钥已保存」，第一次推理才炸 401。
+（本仓第一版就是这样写的，自查时抓到并改掉。）
+
+代价如实说：`2xx` 那条**真的会生成一次回答**，用 `max_tokens: 1` 压到最小（有余额时约 1 个 token）；
+只在用户显式粘贴一次时发生，不在热路径上。探针目标取自**这次调用自己拉到的目录**（已滤掉免费档），
+所以真 key 挑的是它有权用的那份、乱写的 key 挑的是公开的那份——「凭据」是唯一的变量。
 
 ### 顺手修掉的一个会静默泄密的 bug
 
@@ -527,6 +600,7 @@ src/
     zcode.js          ZCode（智谱）族（两条通道二选一；凭据只粘贴，不解密磁盘密文）
     raccoon.js        Raccoon（商汤小浣熊）族（凭证只粘贴；目录失败回落兜底表；不实现领取）
     codearts.js       CodeArts（华为云）族（凭证只粘贴三件套；**不能续期**，`refresh` 是刻意的 no-op；benefit 头两次尝试）
+    opencode.js       OpenCode Zen（key 级；**本仓唯一一个**：只给一把静态 key）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
@@ -744,7 +818,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   | 事实 | 后果 |
   |---|---|
   | `assembled()` 拿 `envelope.blocks.length` 与**它自己见过的块数**对一下，对不上就**整个信封丢掉** | `blocks` 必须与流里**出现过的**块一一对齐，而且是「见过的顺序」不是「留下的顺序」——`max-tokens` 会丢掉工具调用块，那时宿主**按同样的位置**过滤信封，我们照样得为被丢掉的块留一个占位 |
-  | 我们 15 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
+  | 我们 16 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
   | 签名是**某一个账号**签的 | 回放只给**第一个**候选（`replay: this.#replay && index === 0`）。换号之后把上一家签的东西发给下一家，是既没验过也不该发生的事——上游会拒，而我们无从分辨那是「格式不对」还是「这不是你签的」 |
   | **读不懂就是没有**，绝不抛错 | 版本不认识、模型换了、块数不齐、类型对不上——统统一声不响地降级成「不带这个状态」。宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400 |
 
@@ -1003,6 +1077,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 | `zcode` | `acct-zcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的是：两条通道都活着且可达、无凭据时 401 的形状（两通道不同）、本机 ZCode 客户端的 6 条凭据**全是 `enc:v1:` 密文**（见下） |
 | `raccoon` | `acct-raccoon` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装客户端、没有账号）。真机验到的是：五个端点都活着、三条真实错误形状已捕获（`200003` / `200001` / `100002`）、认证头确实是 `Authorization: Bearer`；本机发现如实报「没有可导入的凭据位点」并列出查过的路径（见下） |
 | `codearts` | `acct-codearts` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装客户端、没有华为云账号）。真机验到的是：四个端点都活着、四条真实错误信封已捕获（`APIG.0301` 无头 / `APIG.0301` 空 `Authorization` / **`APIG.0602` 走 HTTP 400** / **`APIG.0613` 走 HTTP 503**）、`POST …/queue/status` 回 `404 APIG.0101`（证明它只收 GET）；本机发现如实报「有凭据但导不进来」并**在 reason 里逐条列出查过的两个位点**（含它们各自是什么、在不在——「在不在」是真查的，不是抄来的常量）；**签名本身未验**（真机验不到，见下）；**benefit 两次尝试只做了离线 mock 验证**（21 项断言绿，真机未验）；凭据是**临时**的且**不能续期**（`refresh` 是刻意的 no-op，见下） |
+| `opencode` | `acct-opencode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机那把 key **没余额**：付费模型 `402 Insufficient account funds`、免费模型 `403 FreeTierError`，所以这条线上**一次真实推理都跑不了**）。真机验到的是**上游那一侧**：带真 key 的 `GET /zen/v1/models` 回 **13 条**（不带 key 回 87 条 ⇒ 目录按凭据裁剪）、`403 FreeTierError` 与 `402 Insufficient account funds` 两个信封逐字、免费档对第三方客户端整体关闭（**把官方 CLI 的两个指纹头照算法补齐之后仍然 403**）、以及**一整套不花钱的请求形状实测**（`stream` / `stream_options` / `max_tokens` vs `max_completion_tokens` / `reasoning_effort` / 无 `Authorization` 的 `GET /models` / 乱写 key 的 `401` 形状）——⚠️ 这一轮**推翻**了原先设想的判据（「`402` = 形状被接受、`400` = 形状被拒」）：这个网关**只校验 `model` 一个字段**，其余请求体原样透传（付费档上连 `max_tokens:"eight"` / `messages:"nope"` / 非法 `reasoning_effort` 都照回 `402`）⇒「`402` 通过」**证明不了**形状正确，于是 `stream_options` 与顶层 `reasoning_effort` 在这条线上**至今未验**，本族**都不发**（`stream()` 恒报一条 `NOT_SENT` 诊断说明原因）。本族是本仓**唯一一个 key 级的族**，也是**没有 `refresh`/`needsRefresh` 的三个族之一**（另外两个是 `agy` 与 `generic`；key 与 agy 的令牌都是静态的、不过期，见下） |
 
 **明确不做的族，以及为什么**：
 
@@ -1170,9 +1245,11 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   `refreshAccount()`，而本族的 `refresh` 是 no-op ⇒ 返回的 auth 与原样一样 ⇒
   `expires_at` 不变 ⇒ 下一次请求又为真 ⇒ **每个请求都白跑一次刷新**
   （顺带 `#catalogs.delete()`，把两处目录端点一起重新打）。
-  **提醒不会因此丢掉**：面板的有效期与「已过期」红字读的是凭据里的**数字** `expiresAt`
-  （`src/api.js` 的 `publicAccount()` 只认 `Number.isFinite`），`authFromPayload` 会把
-  上游给的字符串 `expires_at` 归一成它；真过期时上游还给 `401 APIG.0301`，
+  **提醒不会因此丢掉**：面板的有效期与「已过期」红字读的是凭据里的 `expiresAt`，
+  而 `src/api.js` 的 `publicAccount()` 现在用 `expiryOf()` 取值——**数字直接用，字符串能读成
+  有限数字的也认**（上游给字符串 `expires_at` 是常事），读不出来才是 `undefined`
+  （旧写法只认 `Number.isFinite`：哪个族忘了把字符串归一，面板上那块「已过期」就**静默消失**，
+  一个字都不报）。`authFromPayload` 会把上游给的字符串 `expires_at` 归一成数字；真过期时上游还给 `401 APIG.0301`，
   本族归 `AUTH` ⇒ 换号 + 长冷却，那才是「该重新登录了」的真实信号。
   这与 `zcode` / `trae` / `commandcode` 三族的决定一致：**不能续期的族不得声称需要续期**。
   ⚠ 用户从粘贴路进来时 `expires_at` 本来就是**未知**的（三件套里没有这个字段），

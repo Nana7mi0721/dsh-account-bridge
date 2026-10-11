@@ -37,6 +37,7 @@ const ROUTES = [
   'acct-zcode',
   'acct-raccoon',
   'acct-codearts',
+  'acct-opencode',
   'acct-generic',
 ]
 
@@ -381,6 +382,19 @@ export function apply(ctx) {
     const week = await infer('mock-429-week', 'e2e-week')
     check('上游说「一周后再来」时归类为 RATE_LIMIT，而不是额度用尽', week.failure?.code === 'RATE_LIMIT', JSON.stringify(week))
 
+    // 毫秒退避的两个头：`retry-after-ms` 里写的**不是数**（网关写 `soon` 是常事），
+    // 真数字在旁边那个 `x-retry-after-ms` 里。这条守的是 `src/wire/http-error.js` 的
+    // `retryAfterMs()`：早期实现用 `??` 串两个头，只看「有没有这个头」不看「它有没有
+    // 写出一个数」⇒ 整条毫秒路返回 undefined，上游说的 15 分钟被丢掉（表现为池子
+    // 只按自己的默认退避等，用户会看到同一个账号被反复试）。
+    // 断言 `providerRetryAfterMs` 是那个 900000：不是 undefined，也不是我们编的默认值。
+    const ms = await infer('mock-429-ms', 'e2e-ms')
+    check(
+      '毫秒退避：`retry-after-ms` 不是数字时看旁边那个 `x-retry-after-ms`',
+      ms.failure?.code === 'RATE_LIMIT' && ms.failure?.providerRetryAfterMs === 900000,
+      JSON.stringify(ms),
+    )
+
     // 同一个 403，正文说「余额不足」。旧行为是「403 一律 AUTH」⇒ 停号 **24 小时**、
     // 宿主还把它显示成「API 密钥无效」；而 AUTH 与额度类的差别就是 24 小时与 30 分钟。
     // 停号时长那半条在下面读 state 时一起断言（`为什么` 与 `停多久` 必须同时改对）。
@@ -651,6 +665,55 @@ export function apply(ctx) {
       'CodeArts 的登录面如实只有 paste 一条路',
       codeartsMethodIds.includes('paste') && codeartsStateRow?.discoverable === true,
       `loginMethods=${JSON.stringify(codeartsStateRow?.loginMethods ?? null)}；discoverable=${codeartsStateRow?.discoverable}`,
+    )
+
+    // OpenCode Zen 专有的一条：显示名如实、本机发现**恰好报出 `opencode` 那一条**，
+    // 而且**没有**把 `auth.json` 里另外六把别家的 key 当成本族的凭据。
+    //
+    // 为什么值得单独一条：这一族的凭据位点是一个**多租户**文件——本机的
+    // `~/.local/share/opencode/auth.json` 里躺着 7 个 provider 的 key
+    // （`deepseek` / `siliconflow-cn` / `longcat` / `zhipuai` / `google` / `amd` / `opencode`），
+    // 而**只有最后那个是 Zen 的凭据**。最容易出的错就是「把整个文件当凭据读进来」
+    // 或者「把 7 条都报成本族可导入」：前者会把别人的 key 拿去打 Zen（必然 401），
+    // 后者会让用户在导入面板里看到 7 个假的 Zen 账号。
+    // 断言的是「如实报告」+「点出查过的路径」，不是具体文案。
+    const opencodeRow = byId.get('acct-opencode')
+    const opencodeScan = await safe(() => discover?.execute?.({ family: 'opencode' }), 'discover(opencode)')
+    const opencodeScanText =
+      typeof opencodeScan === 'string' ? opencodeScan : String(opencodeScan?.content?.[0]?.text ?? opencodeScan ?? '')
+    // 只断言**呈现在报告里**的东西，而且把「身份」与「解释」分开看：
+    // `reason` 是**故意**点名那六个键的（不点名的话，用户看到「导不进来」没法复核我们查对没查对），
+    // 所以拿整份报告去断言「不含 deepseek」会是个假失败。真正要守的是
+    // **身份位（family / label / sourcePath）上不能出现别家的东西**。
+    const foreignKeyNames = ['deepseek', 'siliconflow-cn', 'longcat', 'zhipuai', 'google', 'amd']
+    const opencodeIdentities = [...opencodeScanText.matchAll(/^- (\S+) ｜ ([^｜\n]*?)(?: ｜ 来源 (\S+))?(?: ｜ |$)/gm)]
+      .map((match) => `${match[1]} ${match[2]} ${match[3] ?? ''}`)
+      .join('\n')
+    check(
+      'OpenCode Zen 的显示名与本机发现都如实报告，且没有把别家的 key 当成自己的凭据',
+      String(opencodeRow?.name ?? '').includes('OpenCode Zen') &&
+        opencodeScanText.includes('opencode') &&
+        // 查过的路径必须真的出现：这一族全部的「我们查对了地方」证据就是这份路径清单
+        // （而且它是**一个**文件，不是一族一个目录）。
+        /auth\.json/.test(opencodeScanText) &&
+        // 身份位上只有 opencode 这一条，别家的名字一个都不许出现。
+        foreignKeyNames.every((name) => !opencodeIdentities.toLowerCase().includes(name)),
+      `name=${JSON.stringify(opencodeRow?.name)}；identities=${JSON.stringify(opencodeIdentities)}；discover=${opencodeScanText.slice(0, 400)}`,
+    )
+
+    // OpenCode Zen 的第二条：登录面**如实只有 paste 一条路，而且那条路在状态里可见**。
+    //
+    // 为什么值得单独一条：本族是本仓**唯一一个 key 级的族**——没有 OAuth、没有浏览器通道，
+    // 凭据就是一把静态 key，所以「粘贴」不是兜底而是**唯一**的登录路。一个方法列表是空的族，
+    // 用户点「+ 添加账号」会得到一个什么都不做的按钮，而这件事在别的检查里完全看不见。
+    // 另一半断言 `discoverable === true`：本族**有**可导入的本机凭据（上面那条检查已证明），
+    // 所以发现面必须是开着的——这正是它与 codearts/raccoon 那种「有凭据但导不进来」的分界。
+    const opencodeStateRow = (state?.families ?? []).find((entry) => entry.family === 'opencode')
+    const opencodeMethodIds = (opencodeStateRow?.loginMethods ?? []).map((method) => method.id)
+    check(
+      'OpenCode Zen 的登录面如实只有 paste 一条路',
+      opencodeMethodIds.includes('paste') && opencodeStateRow?.discoverable === true,
+      `loginMethods=${JSON.stringify(opencodeStateRow?.loginMethods ?? null)}；discoverable=${opencodeStateRow?.discoverable}`,
     )
 
     // 两个腾讯变体必须**看着就是两个东西**：它们共用同一份凭据文件与同一条线协议

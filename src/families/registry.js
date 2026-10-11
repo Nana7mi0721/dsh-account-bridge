@@ -19,6 +19,7 @@ import { zcodeFamily } from './zcode.js'
 import { genericFamily } from './generic.js'
 import { grokFamily } from './grok.js'
 import { minimaxFamily } from './minimax.js'
+import { opencodeFamily } from './opencode.js'
 import { qoderFamily } from './qoder.js'
 import { raccoonFamily } from './raccoon.js'
 import { workbuddyFamily } from './workbuddy.js'
@@ -51,6 +52,11 @@ export const FAMILIES = [
   // `refresh` 是刻意的 no-op、`needsRefresh` 恒 `false`，这是本族与上面每一族最大的
   // 差别，见 `families/codearts.js` 的文件头第一节。
   codeartsFamily,
+  // OpenCode Zen 同理。⚠ 它是本仓**唯一一个 key 级的族**，而且**没有** `refresh` /
+  // `needsRefresh`（API key 不过期，凭据就是一把静态 key）。为什么不干脆留给 `generic`
+  // 的第九个预设，见 `families/opencode.js` 的文件头 —— 一句话：它的能力元数据在
+  // 上游目录里**根本不存在**，要去 `models.dev` 取，而目录本身还要按凭据裁剪。
+  opencodeFamily,
   genericFamily,
 ]
 

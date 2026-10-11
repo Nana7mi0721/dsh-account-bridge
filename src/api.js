@@ -98,13 +98,29 @@ export function publicAccount(account, extra = {}) {
     /** 凭据是否带 refresh token——面板据此显示「可续期 / 需重新登录」。 */
     renewable: typeof auth.refresh === 'string' && auth.refresh.length > 0,
     /** 只暴露过期时刻，不暴露 token 本身。 */
-    expiresAt: Number.isFinite(auth.expiresAt) ? auth.expiresAt : undefined,
+    expiresAt: expiryOf(auth),
     /** 这个账号用的是什么形态的凭据（oauth / cli / apikey / endpoint），不给值。 */
     authKind: auth.baseUrl ? 'endpoint' : auth.refresh || auth.access ? 'oauth' : auth.apiKey || auth.apiKeyEnv ? 'apikey' : 'cli',
     /** 有 baseUrl 的账号可以展示主机名（用户自己填的，不是机密）。 */
     host: typeof auth.baseUrl === 'string' ? safeHost(auth.baseUrl) : undefined,
     ...extra,
   }
+}
+
+/**
+ * 凭据的过期时刻，只认数字。
+ *
+ * 族里的凭据大多是照抄上游的，而上游给字符串是常事——CodeArts 的 `expires_at`
+ * 就是字符串（它自己在族里归一过了）。从前这里只认 `Number.isFinite`，于是
+ * **哪个族忘了归一，面板上「凭据已过期」那块就再也不出现**，而且没有任何报错：
+ * 一处静默的界面缺失，比一个抛出来的错误难查得多。这里收尾认一次：数字直接用，
+ * 字符串能转成有限数字就用，其余一律 undefined（不编一个时刻出来）。
+ */
+function expiryOf(auth) {
+  const value = auth?.expiresAt
+  if (Number.isFinite(value)) return value
+  const parsed = typeof value === 'string' && value.trim() !== '' ? Number(value) : NaN
+  return Number.isFinite(parsed) ? parsed : undefined
 }
 
 /** 从 baseUrl 里取主机名；取不到就返回 undefined，绝不抛。 */
