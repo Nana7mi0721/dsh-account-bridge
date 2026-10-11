@@ -91,7 +91,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 把 Raccoon（商汤小浣熊）家族注册成 provider route（`acct-raccoon`，显示名 `Raccoon (商汤)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 Raccoon Work 客户端，也没有账号**）。真机验到的是**上游那一侧**：五个端点都活着（`chat/completions` / `model_catalog` / `user_info` / `points/balance` / `auth/refresh`），并用**明显无效的令牌**捕获了真实错误形状（401 是 `{"code":200003,"message":"authorization_verify_error",…}`，不带认证头是 `200001 authorization_empty_error`，`refresh` 用坏令牌是 `400 100002 params_invalid_error`）——三条都证明认证头确实是 `Authorization: Bearer` |
 | 把 CodeArts（华为云）家族注册成 provider route（`acct-codearts`，显示名 `CodeArts (华为云)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机**没装 CodeArts 客户端，也没有华为云账号**：`~/.codearts`、`~/.cache/deveco`、JetBrains 的 `AppData` 目录一个都不存在）。真机验到的是**上游那一侧**：四个端点都活着（`/api/v2/chat/completions`、`/v1/model/builtin`、`/api/v1/queue/status`、`/snap-manager/v1/statistics/plugin`），并用**明显无效的凭据**捕获了真实错误信封（无认证头是 `401 {"error_msg":"Incorrect IAM authentication information: x-auth-token not found","error_code":"APIG.0301",…}`，空 `Authorization` 是 `401 …error authorization header: failed parse aksk format…`，伪造签名是 **`400`** `{"error_msg":"Bad request: invalid token format","error_code":"APIG.0602",…}`，第三轮同一形状又抓到 **`503`** `{"error_msg":"The IAM service is currently unavailable: system error","error_code":"APIG.0613",…}`）——四条都证明这条线确实要 `SDK-HMAC-SHA256` 签名，且**带签名的请求真的会走进验签流程**（不带签名在网关本地就被拒）。⚠️ 签名**没在真机上验过**（无效凭据走不到验签那一步） |
 | 把 OpenCode Zen 家族注册成 provider route（`acct-opencode`，显示名 `OpenCode Zen`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机那把 key **没余额**：付费模型一律 `402 Insufficient account funds`，免费模型一律 `403 FreeTierError` ⇒ **这条线上一次真实推理都跑不了**，不是没试）。真机验到的是**上游那一侧**：① 带真 key 的 `GET /zen/v1/models` 回 **13 条**，不带 key 回 **87 条**；② 两种档位的失败信封逐字（`403 FreeTierError` / `402 Insufficient account funds`）；③ 免费档对第三方客户端**整体关闭**；④ 请求形状是**在不花钱的前提下实测**的——这把 key 的每一次请求都会在计费前被拒，所以「`402` = 请求被接受、`400` = 请求形状被拒」可以直接当探针用 |
-| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
+| **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；前端有 15 条自动检查（渲染树 + 样式表关键词），**但面板仍然没有在真浏览器里被人看过一眼**，观感与布局没有任何守卫（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
 | **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
@@ -116,6 +116,25 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
    只放 id / 标签 / 来源 / 是否停用 / 是否可续 / 过期时间 / 代理 / 状态 / 冷却 / 额度。
    `auth.access`、`auth.refresh`、`auth.apiKey` 一律不外传；将来 `auth` 里加了新字段，
    默认也是不外传（白名单的好处就是**漏掉是安全的**，黑名单则是漏掉就泄密）。
+
+### 它长什么样：macOS 27 的 UI Kit，值是**生成**出来的
+
+面板的视觉不是手调的。`src/client.js` 里那 1900 多行主题是**从一份 macOS 27 的样式表裁出来的**：
+按面板真正用到的那几十个组件留规则、保留声明的 `var(--mac-*)` 做传递闭包、四段主题结构重排，
+**规则体逐字照抄，只删不写**。生成命令在 `client.js` 文件头注释里；两行 `>>> BEGIN MAC THEME` /
+`<<< END MAC THEME` 之间是它的产物，**改生成器再重跑，不要手改那两行之间**。
+
+- **表面**：DSH 的设置页是内容区而不是窗口，所以面板里一处玻璃材质都没有；唯一用 blur 的是动作菜单（弹出层可以用）。
+- **骨架**：一个族是一张 `.mac-group-box`（`<fieldset>` + `<legend>`），一个账号是一行 `.mac-list-row`。
+- **开关**：`.mac-switch`，`input` 必须在 `.mac-switch` **里面**——否则 `:has(input:checked)` 与 `input:checked ~ .mac-switch__knob` 两条都命中不到，症状是「开关点不动，且不报错」。
+- **额度**：`.mac-progress--small`，宽度只由 `--value` 一个自定义属性给（这是它唯一认的属性）；「未知」不画条，见上面第 2 条。
+- 面板自己的类一律 `dab-` 前缀，只写布局与语义色；颜色只用主题 token 或 `light-dark(亮, 暗)`，不手写十六进制。
+
+**改前端时靠什么知道没写错**：`npm test` 里有 15 条前端检查（`test/e2e/client-render.mjs`），
+它用一套迷你 React 把 `src/client.js` 渲染出来，查类名、文案、`--value`，以及**点开动作菜单之后里面是什么**。
+它证明不了什么也写在那个文件头：**好不好看、以及任何布局与层叠**——样式表只被当成文本查过关键词。
+（为什么类名值得机械地查：React 里写错类名不会报错，只是静静地不生效。还有一条对账脚本
+把主题块之外的每个 `mac-*` / `dab-*` 类名与两处定义比一遍。）
 
 ### 这个面板背后的 HTTP 面，以及它为什么不设 token
 
@@ -549,7 +568,8 @@ THIRD_PARTY_NOTICES.md  借用了哪些上游代码、以什么许可借的、�
 src/
   index.js            插件入口：apply / name / inject
   api.js              回环 HTTP 数据面（面板用的 POST /account-bridge/<action>）
-  client.js           设置页「账号池」面板 + 模型页行内摘要/页脚（手写客户端模块，无构建步骤）
+  client.js           设置页「账号池」面板 + 模型页行内摘要/页脚（手写客户端模块，无构建步骤；
+                      里面那一大段主题是**生成物**，生成命令在文件头注释里）
   commands.js         `/pool` 命令族（只读状态 / 真查额度 / 解冻冷却）
   pool.js             账号池适配器（实现 dsh-llm 的适配器契约）
   health.js           失败归类 → 冷却建议 → 冷却表
@@ -608,7 +628,8 @@ test/
     harness.mjs       端到端编排：起假上游、起真的无头宿主、建临时 profile、收摊
     mock-upstream.mjs 假上游（**故意难伺候的验收台**；不许为了让自己那关过而改宽容）
     preflight.mjs     四条静态前置检查（源码规矩、署名台账、写盘面、宿主红线）
-    e2e.test.js       唯一的测试文件：把探针报告翻译成测试结果
+    client-render.mjs 前端检查：一套迷你 React，把 src/client.js 渲染一遍再查渲染树
+    e2e.test.js       唯一的测试文件：把上面两份报告翻译成测试结果（自己不判断任何事）
     probe/            仓内探针：在真宿主里造账号、发真请求、断言宿主看见的那份东西
 docs/
   family-contract.md  「怎么加一个族」的完整规格——**想加族就先读这一份**
@@ -735,7 +756,7 @@ node test/e2e/harness.mjs          # 同上，并且把宿主的输出一并转�
 node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 ```
 
-一轮 `npm test` 做四件事：
+一轮 `npm test` 做五件事：
 
 1. **四条静态前置检查**（`test/e2e/preflight.mjs`）：源码里不许按裸模块名 import 核心包；
    `THIRD_PARTY_NOTICES.md` 里登记的每个源文件必须自己注明来源；会写盘的源码只准是
@@ -753,13 +774,22 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
    `mock-anthropic-only` 两个模型各自只出现在一条方言的目录里，用来把一笔请求钉死在一条路上。
 3. 起一个**真的无头宿主**（`<exe> <cli.js> --profile e2e`，`DSH_HOME` 指向 `test/e2e/.home/`），
    插件是按 `link:` 装进去的 ⇒ **改 `src/` 立刻生效，改探针要重跑**。
-4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 38 条检查，结果写进报告文件再由 `npm test` 读回来。
+4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 **43 条检查**，结果写进报告文件再由 `npm test` 读回来。
+
+5. **把前端也渲染一遍**（`test/e2e/client-render.mjs`，跑在本进程里，不需要宿主）：一套迷你 React
+   （`createElement`/`useState`/`useEffect`/`useCallback`，20 轮不收敛就报「渲染 20 轮还没稳定」）
+   加一个假 `fetch`，把 `src/client.js` 的三处席位都渲染出来，再查渲染树：族卡片是不是 group box、
+   账号行是不是 list row、额度条的 `--value` 有没有换算成百分数、「未知」有没有被写成 0%、
+   空池/登录中/登录失败三种族各说了什么话。**动作菜单要点一次才渲染**，所以它还会调一次
+   `onClick` 再渲染第二遍——菜单里有什么，只有点开才知道。
 
 要求 Node ≥ 20 与一份 DSH 桌面版（默认 `D:\Program\deepseek harness desktop`，
 可用 `DSH_DESKTOP` / `DSH_HOST_EXE` / `DSH_HOST_CLI` 覆盖）。临时 profile 建在
 `test/e2e/.home/`（已 gitignore）：**第一次要装 200 多个包、半分钟左右**，之后就走缓存。
 
-**加测试 ＝ 加一条检查。** 检查写在探针里（`test/e2e/probe/index.js`），套路固定：
+**加测试 ＝ 加一条检查。** 后端写在探针里（`test/e2e/probe/index.js`），**前端写在
+`test/e2e/client-render.mjs` 里**（同一个 `check(name, pass, detail)` 形状，`e2e.test.js` 自动把它
+变成测试）。后端套路固定：
 用 `account_bridge_*` 工具造出需要的账号 → 让池子真的发一次请求 → 断言宿主看见的那份东西
 （chunk 序列、`finish.reason.kind`、`failure.code`、数据面返回的字段）。断言要写在探针里、
 **不要**挪到 `e2e.test.js`——那里只负责把报告翻译成测试结果，一行判断都不要有。

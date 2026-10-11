@@ -35,8 +35,12 @@ WorkBuddy、CodeBuddy、CommandCode、Grok、GitHub Copilot、Trae、z.ai、Racc
 test/e2e/e2e.test.js 逐条把它变成测试结果
 ```
 
+**前端的那一半不走宿主**：面板坏了不会有任何宿主症状，所以 `test/e2e/client-render.mjs`
+用一套迷你 React 在本进程里把 `src/client.js` 渲染一遍（15 条检查：类名、文案、额度条的
+`--value`、点开菜单之后里面是什么）。**它证明不了观感与布局**，这条写在那个文件头。
+
 **不写单元测试、不写回归测试、不写假宿主替身。** 要加检查就改探针（`test/e2e/probe/index.js`），
-不要新建测试文件——`test/` 下除了 `e2e/` 不该有别的东西。
+**前端的加在 `test/e2e/client-render.mjs` 里**，不要新建测试文件——`test/` 下除了 `e2e/` 不该有别的东西。
 
 ```bash
 npm test                          # 全部
