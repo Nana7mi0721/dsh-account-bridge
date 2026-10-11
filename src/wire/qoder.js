@@ -63,7 +63,24 @@ export const QODER_USER_AGENT = `qoder/${QODER_IDE_VERSION}`
  * 见 {@link QODER_DESKTOP_CLIENT_TYPE}——**两者不是一回事，别把 `10` 拿来给 chat 用**。
  */
 export const QODER_CLIENT_TYPE = '5'
-/** 桌面标识，**只**用于 `/sash/...` 活动端点；本族不发起那些请求，故仅作记录。 */
+/**
+ * 桌面标识，**只**用于 `/sash/...` 活动端点；本族不发起那些请求，故仅作记录。
+ *
+ * ⚠️ 将来若有人真去接「每日领取」，有三件事不要踩（本仓不做签到，与 trae 族同一条理由：
+ * 那是唯一会改变用户账号状态的动作）：
+ *
+ * 1. **幂等判据是响应体里的 `replayed`，不是 HTTP 状态码**——首次成功与重放成功都回 200，
+ *    只看状态码会把一次重放当成一次新领取。
+ * 2. **必须与机器头成对出现**（`Cosy-Machineid` / `Cosy-Machinetoken`）：缺任一个上游回
+ *    `claimable: false`，而那个字段会被读成「今日已领」，于是这条路径**永远不再尝试**。
+ *    这一条我们的头生成器本来就满足——`buildCosyHeaders()` 无条件发这两个头；
+ *    所以真正会踩的是第 1 条，不是这一条。
+ * 3. **窗口按 UTC+8 每天 10:00 刷新**，不是按「距上次领取 24 小时」。
+ *
+ * 来源：`temp/codearts` 的 `docs/agent-notes/providers-qoder.md`（借的是**证据**不是代码，
+ * 见 `THIRD_PARTY_NOTICES.md` 的「借用的证据」一节）。前两条有它的实测记录，
+ * 第三条是它对刷新时间的观察——**本仓没有 Qoder 账号，一条都没有复验过**。
+ */
 export const QODER_DESKTOP_CLIENT_TYPE = '10'
 export const QODER_DATA_POLICY = 'disagree'
 export const QODER_LOGIN_VERSION = 'v2'

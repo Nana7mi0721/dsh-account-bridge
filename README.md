@@ -961,6 +961,21 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 
 ## 未定事项
 
-- LICENSE：尚未添加（社区 DSH 插件惯例是 MIT，但加之前需要作者确认——不加就等于保留所有权利）。
-- 第三档族（codebuddy / cline / opencode / kiro / devin / factory / zhipu / qwen / mimo / sensenova / longcat）：
+- 第三档族（cline / kiro / devin / factory / zhipu / qwen / mimo / sensenova / longcat）：
   在 `src/discover.js` 的 `UNSHIPPED_SITES` 机制里留着位置，尚未实现。详见计划书 §4.2。
+- **图片字节预算：本仓还没做，证据已经备好。** 池子的 `#withImageData()` 现在把附件库里那张图
+  **原样**取出来当 base64 发出去（`attachments.readImage()`），而宿主的规范上限是每张
+  4 MiB / 4.19 M 像素（`@deepseek-ai/dsh-attachment-local` 里 `normalizedImageMaxBytes`
+  与 `normalizedImageMaxPixels` 的 `?? 4194304` 默认值）。按**请求体**设限的网关会被这个噎住：
+  参考实现实测 qoder 8 张过、15 张 `TRANSPORT`（≈57 MiB），raccoon 硬限 10 MB（`HTTP_413`），
+  cline 24 张过、32 张 `TRANSPORT`（≈122 MiB）；腾讯系撞的不是字节而是**视觉 token**（15 张）。
+  它给的字节目标是**故意分家的**（qoder/lobsterai/cline 1 MiB、raccoon 512 KiB、其余 2 MiB）
+  ——**别合并成一个常量**。宿主有正确的入口：`attachments.readImageRequest(ref, { width, height,
+  maxBytes }, signal)`（返回 `{ data, mediaType, width, height }`，与现在用的 `readImage()`
+  返回形状不同），尺寸用宿主导出的 `requestImageDimensions(width, height, maxPixels)` 从原图算。
+  要做就按族声明目标（默认别低于上面那几个实测值），并且要在探针里加一条「图多到会撞墙」的检查。
+- **TRAE 的 `4008` 到底停多久**：上游给的是当日配额，我们只冷 15 分钟（见 `src/wire/trae.js`
+  里那张码表旁的注释）。拿到 Trae 真账号第一件事是核它。
+- **`X-Product` 的真值**：WorkBuddy 保持 `SaaS`、CodeBuddy 报产品码，两边都没有本仓的抓包证据
+  （见上面「一个厂商两个产品」一节）。要翻只改一个布尔。
+- **界面**：面板与模型页摘要都只在数据面验过，**从未在真浏览器里看过**（见「族的状态与取舍」）。

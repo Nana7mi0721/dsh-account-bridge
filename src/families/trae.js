@@ -981,6 +981,10 @@ export async function* stream(ctx, options) {
     config_name: learned?.wireConfigName ?? model,
     // `reasoning_effort` 是单源证据的字段：把宿主的 `effort` 原样透传，
     // 不猜上游的档位枚举（猜错就是每个请求都 4001）。
+    // 参考实现还记着一条上游脾气：**某些档位（它举的是 `extra_high`）会随机只回思考、
+    // 不吐正文**。真那样的话这一轮在我们这里是「一个字都没出」——池子会按空回答换号
+    // （`EMPTY_RESPONSE`，见 `src/pool.js` 的换号缓冲），而不是把一段空话当成功交给调用方。
+    // 那是正确的处置，所以这里不需要特判；但**别写「正文一定非空」这类断言**。
     reasoning_effort: typeof effort === 'string' && effort !== '' ? effort : undefined,
   })
 

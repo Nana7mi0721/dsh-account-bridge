@@ -746,6 +746,10 @@ export function traeHttpError(response, text, who = ID) {
  *   `4008` 该账号没这个模型的配额 → `ACCOUNT_QUOTA`（**与积分余额无关**：实测 3 个号
  *          里 2 个如此，其中一个面板还有 200 积分。归成「客户端参数错」会被核心
  *          当成 unknown 只冷 30 秒）
+ *          ⚠️ **它的时间尺度可能是一整天**：参考实现记的是「上游给 24 小时冷却，我们给
+ *          15 分钟」（`ACCOUNT_QUOTA` 的冷却见 `src/health.js` 的 `COOLDOWN`）。两者都
+ *          没有本仓的真机证据，所以**拿到 Trae 真账号之前不改**——要改也只该给这一族
+ *          更长的冷却，不是把全局的 `COOLDOWN.quota` 调大（那会连累别的族）。
  *   `4011` 该 function 不服务此模型 → `MODEL_UNAVAILABLE`。**它的 message 谎称
  *          "rate limit"**，照 message 归类就会 5 分钟后重试同一个必然失败的东西。
  *   `4001` 参数无效（含「版本码不对导致这张表里没有这个模型」）→ `MODEL_UNAVAILABLE`
