@@ -82,7 +82,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | **设置 → 模型页的行内摘要**：每张 `acct-*` provider 卡片下方一行池子状态 + 页脚一整池的汇总 | ⚠️ 端到端验到它要的那份数据（`/account-bridge/state`）；**真的在浏览器里看见**待人工确认 |
 | Codex / Claude 的真实登录 + 真实推理 | ⛔ 未验证（本机没有这两个订阅账号） |
 | 用量徽章（`SubscriptionUsageBadge` 那种常驻角标） | ⛔ 未做（额度只在面板里按需查） |
-| **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 8 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
+| **任意 OpenAI / Anthropic 兼容端点**：填地址 + 密钥就能用，含 9 个预设（OpenRouter / DeepSeek / 硅基流动 / Moonshot / 智谱 / 百炼 / OpenCode Zen / Ollama / LM Studio） | ✅ 真机端到端（用一个插件写代码时不知道其存在的假端点验收） |
 
 ## 设置页里的「账号池」面板
 
@@ -278,6 +278,25 @@ MiniMax 的 refresh token **每用一次就轮换一次**：拿旧令牌换到�
 4. **没有 `quota`。** OpenAI 的接口语义里没有标准化的额度端点，Anthropic 也没有。
    与其声明式地编一个进度条，不如什么都不报——**报一个假的剩余额度比不报更糟**。
 5. **它对上游的方言做了让步，每一处都是被真机逼出来的**（见下面的验收一节）。
+
+### OpenCode Zen：为什么它是一个预设，而不是一个族
+
+本机实测（2026 年，HTTP 实测、不是转述）：
+
+| 请求 | 结果 |
+| --- | --- |
+| `GET https://opencode.ai/zen/v1/models` + `Authorization: Bearer public` | **200，87 条**（`public` 是官方 CLI 无 key 时自己用的字面量） |
+| 同一端点 + 本机那把真 key | **200，只有 13 条** ⇒ **目录按凭据授权范围裁剪**，别把 87 条当成「用户能用」 |
+| `POST /zen/v1/chat/completions` + 任意 key（含真 key）打 `-free` 模型 | **403** `{"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}` |
+| 同上，打付费模型（本机那把 key 没余额） | **402** `Insufficient account funds` |
+
+第二行那次是把 `x-opencode-project`（按官方算法 `sha1('git-remote:opencode/' + sha256(identity + ' ' + generation))`
+真算）与 `x-opencode-session`（造成 `ses_` + 12 位 hex + 14 位 base62 的形状）都补齐了之后**仍然 403** ⇒
+「只能在 OpenCode 客户端里用」这道门**比请求头更深**，本插件进不去。
+
+所以 OpenCode Zen 走的是 `generic` 的预设：它有 key、没有登录态，而它的地址与路径
+（`/models` + `/chat/completions`）和这一族的默认完全吻合。三方客户端能用的是**付费**那条路。
+若哪天需要一条独立的 `acct-opencode` 路由（带 `models.dev` 的能力表与匿名槽），再说。
 
 ### 验收方式：拿一个插件写代码时不知道其存在的端点
 

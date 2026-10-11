@@ -7,6 +7,9 @@
  *
  * 它和别族的三点不同，都是刻意的：
  *
+ * 这份文件里 OpenCode Zen 那一段事实的出处、基线提交与改写说明见
+ * `THIRD_PARTY_NOTICES.md` 的「借用的证据」一节。
+ *
  * 1. **没有 `refresh`**。API Key 不会过期，也就没有刷新、没有写回、没有并发刷新那一堆事。
  *    这一族对上游是纯只读的（计划书「默认只读」那条在这里天然成立）。
  * 2. **一个端点可以有多个 Key**。host 内置的配置式 provider 只吃一个 Key；这一族把
@@ -64,6 +67,21 @@ const PRESETS = [
   { id: 'moonshot', label: 'Moonshot（Kimi）', baseUrl: 'https://api.moonshot.cn/v1', env: 'MOONSHOT_API_KEY' },
   { id: 'zhipu', label: '智谱 GLM', baseUrl: 'https://open.bigmodel.cn/api/paas/v4', env: 'ZHIPUAI_API_KEY' },
   { id: 'dashscope', label: '阿里云百炼', baseUrl: 'https://dashscope.aliyuncs.com/compatible-mode/v1', env: 'DASHSCOPE_API_KEY' },
+  // OpenCode Zen：地址与路径和本族默认完全吻合（`/models` + `/chat/completions`），
+  // 所以它是一个预设而不是一个族——它没有账号级登录态，只有一把 key。
+  //
+  // 三条真机实测（本机、HTTP 实测而非推测）：
+  //   · 带 key 的 `GET /zen/v1/models` 只回**这个 key 授权范围内的 13 条**；
+  //     不带 key 的（`Authorization: Bearer public`，官方 CLI 无 key 时自己就用这个字面量）
+  //     回全量 87 条 ⇒ 目录是按凭据裁剪的，别把 87 条当成「用户能用」。
+  //   · 目录字段只有 `id/object/created/owned_by`，**没有任何能力信息**
+  //     ⇒ 上下文窗口只能靠这一族的声明式 `models` 或保守默认值。
+  //   · 免费通道（不带 key，或带 key 打 `-free` 模型）现在一律
+  //     `403 {"type":"error","error":{"type":"FreeTierError","message":"OpenCode's free tier can only be used from within OpenCode"}}`，
+  //     把 projectId 按官方算法真算、session id 造成 `ses_`+12hex+14base62 的形状也一样
+  //     ⇒ 「只能在 OpenCode 客户端里用」这道门比请求头更深，本插件进不去。
+  //     付费模型则按 key 的余额走（本机这把 key 实测 402 Insufficient account funds）。
+  { id: 'opencode', label: 'OpenCode Zen', baseUrl: 'https://opencode.ai/zen/v1', env: 'OPENCODE_API_KEY' },
   { id: 'ollama', label: '本机 Ollama', baseUrl: 'http://127.0.0.1:11434/v1', env: '' },
   { id: 'lmstudio', label: '本机 LM Studio', baseUrl: 'http://127.0.0.1:1234/v1', env: '' },
 ]
