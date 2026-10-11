@@ -605,6 +605,17 @@ export class AccountBridgeAdapter {
       const account = await this.#store.read(accountId)
       if (!account) throw new Error(`account-bridge: account "${accountId}" disappeared during refresh`)
 
+      // `refresh` 是族的可选项（`needsRefresh` 也是）。这一句从前直接写 `family.refresh(...)`，
+      // 于是「省略 refresh」的族要等到用户点面板上的「刷新」才炸出一个 TypeError，而它会被
+      // 当成一次刷新失败记进冷却表 —— 账号看起来像坏了。写 CodeArts 一族的作者撞上这一下
+      // 才把它报出来；在他之前，zcode 与 commandcode 两族各自补了一个 no-op 来绕开同一颗雷。
+      // 报错本身不带状态码也不常见，`classifyFailure` 落到最后那条兜底 ⇒ 只抛、不罚账号。
+      if (typeof family.refresh !== 'function') {
+        const error = new Error(`account-bridge: ${family.id} cannot renew this credential — sign in again`)
+        error.code = 'NO_REFRESH'
+        throw error
+      }
+
       // 冷却中的账号不再重试刷新。目录没有「失败缓存」，所以没有这道闸的话，
       // 一条已经作废的刷新令牌会被**每一次** listModels 重新拿去打上游。
       // 冷却时长由 `src/health.js` 算出来（见那里的常量表），与请求路径同一套。
