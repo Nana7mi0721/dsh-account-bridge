@@ -53,6 +53,11 @@ const MODELS = [
   // 403 + 只有结构字段 `pricingUrl`（「要付费才能用」）：报文里没有任何钱字，
   // 认不出来就会被当成服务器故障白退避。与 `mock-403-credit` 成对。
   'mock-paywall',
+  // J2：**每个账号都这么说**的那一类。401 在我们这里是认证类 ⇒ 第一次就停 24 小时
+  // （`COOLDOWN.auth`）。一个账号这么说只是它自己的事；每个账号都这么说，
+  // 通常说明问题在这次请求或者出口——magpie 的 LESSONS #4 就是拿「把所有账号一起
+  // rest 了 5 天」换来的。它与上面两条的区别不在状态码，而在**有多少个账号这么说**。
+  'mock-401-all',
   // W6：把上游看见的 key 原样放进回答里。账号各用一把 key 的时候，
   // 「这次是谁答的」就有了上游侧的物证，不用去猜池子的内部状态。
   'mock-whoami',
@@ -377,6 +382,13 @@ function awkwardReply(model, response) {
   if (model === 'mock-paywall') {
     response.writeHead(403, { 'content-type': 'application/json' })
     response.end(JSON.stringify({ error: { code: 112, message: '{"pricingUrl":"https://qoder.com.cn/pricing?client=qoder"}' } }))
+    return true
+  }
+  // J2：401 + 一句「令牌无效」，对**每个**账号都这么答。宿主看到的码仍是 AUTH
+  // （它确实是认证问题），但池子不该因此把池里每个账号各停 24 小时。
+  if (model === 'mock-401-all') {
+    response.writeHead(401, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: { message: 'invalid token' } }))
     return true
   }
   // W3-1：429，但上游自己说「一周后再来」。我们要**只信一小时**（magpie #147：

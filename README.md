@@ -4,16 +4,18 @@
 CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
 而不是每家用一个插件。
 
-> 状态：**P6 完成**——骨架 + 12 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
-> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `generic`）+
+> 状态：**P6 完成**——骨架 + 13 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `zcode` / `generic`）+
 > 本机账号统一发现 +
-> 设置页账号池面板 + `/pool` 命令族。12 条 route 已在真实 DSH 宿主里验证可见
+> 设置页账号池面板 + `/pool` 命令族。13 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
 > **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
 >
 > 当前进行中：**P7 深度改进**（见 `dsh-account-bridge-深度改进计划书.md`）——修「对上游不诚实」
-> 与「账号选得不对」这两类问题，11 个工作包，**W0–W11 全部完成**。
+> 与「账号选得不对」这两类问题，11 个工作包，**W0–W11 全部完成**；此后是 **P7.5 独立审查**
+> （四个审查员、十处修复）与 **P7.7 失败分类的两处修正**：403 说到余额时归额度而不是鉴权，
+> 以及「每个账号都回 401」不许把整池各停一天（见下面「设计要点」）。
 >
 > 测试：**只有端到端测试**（`test/e2e/`，起假上游 + 起真的无头宿主），
 > 单元测试与回归测试都已删除；规矩写在 [AGENTS.md](AGENTS.md)。
@@ -176,7 +178,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 为了让一个可选摘要把整个插件（连同账号池面板）拉下来是不划算的。
 
 **卡片摘要怎么落到我们的 provider 上**：那是 keyed 席位，key 是该 provider 的 `settingsNs`。
-我们的 11 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
+我们的 13 条 `acct-*` 都**没有**在「可配置 provider 目录」里声明过，宿主的
 `joinProviderDirectory()` 给这类 provider 填的 `settingsNs` 就是**空字符串**，
 所以用 `key: ''` 注册一条就能落到所有这些卡片上——组件内部再按 route 过滤，
 别人的卡片一律返回 `null`。
@@ -497,6 +499,7 @@ src/
     grok.js           Grok Responses 线（两个计费口径的端点评址 + 指纹头）
     copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
     trae.js           Trae 私有信封 + 私有 SSE + Electron 存储解密（只解不加密）
+    zcode.js          ZCode（智谱）两条通道：端点/凭据分派 + 官方身份块 + 3012 风控识别
     http-error.js     共享的 HTTP 失败归类（AUTH / QUOTA / TIMEOUT / …→ LlmError）
     failure-words.js  失败词表：同一个 429 的两条路说同一句话（见「设计要点」）
     diagnostics.js    翻译层的结构化诊断（只上报不抛错，有界、去噪、去重）
@@ -513,6 +516,7 @@ src/
     grok.js           Grok 族（默认走订阅口径的 cli-chat-proxy）
     copilot.js        Copilot 族（设备码；非公开接口，随时可能失效）
     trae.js           Trae 族（私有协议；凭据只读，不写回）
+    zcode.js          ZCode（智谱）族（两条通道二选一；凭据只粘贴，不解密磁盘密文）
     generic.js        通用兜底族（任意 OpenAI / Anthropic 兼容端点）
     registry.js       族注册表
 test/
@@ -661,7 +665,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
    `mock-anthropic-only` 两个模型各自只出现在一条方言的目录里，用来把一笔请求钉死在一条路上。
 3. 起一个**真的无头宿主**（`<exe> <cli.js> --profile e2e`，`DSH_HOME` 指向 `test/e2e/.home/`），
    插件是按 `link:` 装进去的 ⇒ **改 `src/` 立刻生效，改探针要重跑**。
-4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 26 条检查，结果写进报告文件再由 `npm test` 读回来。
+4. 仓内的端到端探针（`test/e2e/probe/`）等在宿主里跑 34 条检查，结果写进报告文件再由 `npm test` 读回来。
 
 要求 Node ≥ 20 与一份 DSH 桌面版（默认 `D:\Program\deepseek harness desktop`，
 可用 `DSH_DESKTOP` / `DSH_HOST_EXE` / `DSH_HOST_CLI` 覆盖）。临时 profile 建在
@@ -726,7 +730,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   | 事实 | 后果 |
   |---|---|
   | `assembled()` 拿 `envelope.blocks.length` 与**它自己见过的块数**对一下，对不上就**整个信封丢掉** | `blocks` 必须与流里**出现过的**块一一对齐，而且是「见过的顺序」不是「留下的顺序」——`max-tokens` 会丢掉工具调用块，那时宿主**按同样的位置**过滤信封，我们照样得为被丢掉的块留一个占位 |
-  | 我们 11 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
+  | 我们 13 条 route **共用同一个 adapter 对象**，`forAdapter()` 因此不会替我们把 codex 写的信封挡在 claude 前面 | `kind` 必须自己查；两个线种的字段名也刻意不同（`signature` / `encryptedContent`），免得「读错族的信封」在 kind 检查之外还有第二条路 |
   | 签名是**某一个账号**签的 | 回放只给**第一个**候选（`replay: this.#replay && index === 0`）。换号之后把上一家签的东西发给下一家，是既没验过也不该发生的事——上游会拒，而我们无从分辨那是「格式不对」还是「这不是你签的」 |
   | **读不懂就是没有**，绝不抛错 | 版本不认识、模型换了、块数不齐、类型对不上——统统一声不响地降级成「不带这个状态」。宁可让上游重新生成一次思考，也不要拿一个可疑的东西去换一个 400 |
 
@@ -827,6 +831,21 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   而且目录不缓存失败 ⇒ 每次 `listModels` 都会再拿那条已经作废的令牌去打一次上游。
 - **失败粒度是 `(族, 账号, 模型)`**：配额失败在按模型分线的族（Claude、Antigravity）只停那一格，
   其它族停整个账号；`400/422` 是请求本身的问题，**谁都不罚**。
+- **「拒绝」不等于「鉴权」，也不等于「这个账号坏了」**。两条判据方向相反，缺一条就是一次
+  停掉整个池子的事故：
+  - `401` 只可能是鉴权问题；**`403` 先看它说了什么**——报文说到余额/欠费/定价页时那确实是额度
+    问题（`ACCOUNT_QUOTA`，停 30 分钟），说了别的什么才归 `AUTH`。早期是 `401 || 403 → AUTH`，
+    于是「没钱了」被说成「API 密钥无效」，还停 24 小时。
+  - 反过来，**一个 401 不能只因为它来自每个账号就把整池停一天**：一轮里 ≥2 个不同账号都回
+    `AUTH`、而没有任何账号回过别的东西时，只让这一次请求失败，**一个账号也不停**。一个账号这么说
+    只是它自己的事；每个账号都这么说，通常是这次请求、这个出口或我们自己的请求头出了问题。
+    只有一个账号时无从比较，照旧罚。这条判据来自 magpie 的 `LESSONS.md` 第 4 条，
+    它是拿「把所有账号一起 rest 了 5 天」换来的。
+- **面板与 `state` 报的冷却是 `{reason, scope, until}`，不是一个 `status: 'cooling'`**。
+  `CooldownTable.why()` 在没有生效冷却是会**回落到「上一次为什么被停」**——那是给「这个号今早
+  为什么停了」用的，不是「现在能不能用」。直接拿它当状态，面板就会对早就恢复的账号一直显示
+  「冷却中」，而且说不出停到多久、为什么停；`src/api.js` 因此按 `until > now` 现判一次，
+  过期的冷却一律不报。
 - **停多久是算出来的，不是一个常数**。四条规则都来自 magpie（`internal/gateway/routing.go`），
   它是用事故换来的：
   1. **上游自己说的时间最多信一小时**。教训（#147）：一个 21:34 才恢复的 ChatGPT 账号，
@@ -944,6 +963,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 | `grok` | `acct-grok` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Grok CLI，也没有订阅） |
 | `copilot` | `acct-copilot` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有 Copilot 订阅） |
 | `trae` | `acct-trae` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有任何 Trae 账号） |
+| `zcode` | `acct-zcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的是：两条通道都活着且可达、无凭据时 401 的形状（两通道不同）、本机 ZCode 客户端的 6 条凭据**全是 `enc:v1:` 密文**（见下） |
 
 **明确不做的族，以及为什么**：
 
@@ -951,7 +971,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
   provider（`dist/auth/oauth/kimi-coding.js`，`https://auth.kimi.com` → `https://api.kimi.com/coding`），
   本插件再写一份只是把同一件事做第二遍。**不做。**
 - **`cursor`**——计划书 §4.1 判据 C4 明确排除：Cursor 员工已公开认定这类接入违反其 ToS §1.5。
-- **`zcode`**——按用户决定砍掉。
+- **`zcode` 的签到/领取**——按用户决定砍掉（族本身已实现，砍掉的是它的积分领取）。
 
 **关于 `grok` 与 `copilot` 的一句实话**：宿主内置也已经有 `xai` 与 `github-copilot` 两个 OAuth provider
 （`dist/auth/oauth/xai.js` 用的 client_id 就是 `b1a00492-073a-47ea-816f-4c329264a828`）。
@@ -977,6 +997,58 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 - **不做签到**。它是这一族唯一会**改变账号状态**的动作，而 `9074` 是账号级稳定拒绝
   （换 deviceId / UA / token 都无效）。只保留纯查询的 `quota()`。
 - **不声明推理档位、图片、工具能力**——没有证据就不声明（契约 §5.3）。
+
+**`zcode` 族的五条取舍，以及它的凭据为什么只能手粘**（这一族是**唯一**一个上游会
+**读我们的请求体内容**来判断要不要服务的）：
+
+- **两条通道，选哪条看凭据形态，默认 start-plan**。ZCode 有两条线，响应格式**完全相同**
+  （都是 Anthropic Messages），差别只在**端点与凭据**：`start-plan`（积分制）打
+  `https://zcode.z.ai/api/v1/zcode-plan/anthropic/v1/messages`，带的是 ZCode JWT；
+  `coding-plan`（订阅制）打 `https://api.z.ai/api/anthropic/v1/messages`，带的是 Coding Plan
+  API key（`id.secret` 形态）。参考实现里 start-plan **优先**（用户决定：积分是白给的，
+  不该被订阅额度先消耗），本仓照做。⚠ 两条线的头**不完全一样**：`HTTP-Referer` 是
+  `zcode.z.ai` 专属，发给 `api.z.ai` 是不带它的。
+- **上游会读 `system` 的内容**。对 `zcode.z.ai` 那条线，`system` 里缺官方的身份块结构时，
+  上游回 **HTTP 405 + 业务码 3012**（不是 403，按 403 排查会走到错分支），
+  而且是**基于请求体内容**判的——频率、并发、多轮历史、工具声明、版本头、哪个账号，全都不是判据。
+  本仓按参考实现逐字复刻了那个身份块（2900 字符，含 sha256 锁死的常量），**只发身份块不发它
+  后面那 5 KB 的「行为指令」段**：那几段是给 ZCode 自己那个 coding agent 的，会被放在
+  `system` 开头**压过 DSH 自己的 prompt**，代价是模型变啰嗦、变慢。
+  ⚠ `3012` 有**冷却惩罚**（30 分钟 → 24 小时内第 3 次起 24 小时 → 5 次**停用账号**），
+  所以本仓把它单独归成 `AUTH` 并在错误文案里明说「这不是密钥问题，别重试」——
+  按状态码归类会落到 `SERVER`（换号 + 60 秒冷却），那是**鼓励重试**的错误语义。
+  这条判据**真机未验**（见下）。
+- **本机 ZCode 客户端的凭据，我们不读**。`~/.zcode/v2/credentials.json` 里那 6 条凭据
+  **全是 `enc:v1:` 密文**（实测：1919 / 355 / 263 / 51 / 113 / 113 字符，
+  即 AES-256-GCM 的 `iv.tag.data` 形态），而解开它的派生密钥是
+  `zcode-credential-fallback:<平台>:<家目录>:<用户名>` 过 sha256——**公开可复现**。
+  参考实现为此**专门删掉了整段读盘/解密代码**（净减约 700 行），理由三条：复制「读别人
+  应用登录态」的能力；那份数据里只有单账号、而本仓是**多账号池**（拿一份磁盘凭据去填任意
+  一条正是他们记录过的「跨账号覆盖」数据损坏）；他们本来就有自己的 OAuth 流程。本仓同样不实现。
+  ⇒ 这一族的凭据只能**手动粘贴**（任务书给的那条例外正适用），`discover()` 会**如实报
+  「有凭据但导不进来」并说明是加密存储**，而不是返回空列表——`AGENTS.md` 的
+  「『读不出来』不等于『没有』」在这里不是修辞：返回空数组等于把一次**有意的拒绝**
+  说成**不存在**，用户会以为自己从没登录过 ZCode。
+- **不实现签到/领取积分**。官方客户端的**兑换**接口 `billing/claim` 始终索要阿里云验证码，
+  而那需要驱动一个真浏览器（解密/注入/无头浏览器三选一）。模型请求那条路**不需要**验证码
+  （参考实现 2026-09-29 实测 6 个采样点全 200，本仓的官方客户端日志里
+  `captchaParamLength: 0` / `hasCaptchaVerifyParam: false` 也印证了这一点），
+  所以砍掉领取**不影响推理**，只让积分面板少一个按钮。本仓只保留纯查询的 `quota()`。
+- **不实现官方那 10 次「流恢复重试」**（官方客户端日志里 `streamRecoveryMaxRetries: 10`）。
+  我们没有它的恢复语义，照抄只会把**一次**失败变成**十次上游计费**。流断了就按
+  `EMPTY_RESPONSE` 归类，交给池子换号。
+
+**关于 `zcode` 真机验证到什么程度的一句实话**：本机有两处真实存在的 ZCode 登录态
+（`~/.zcode/v2/credentials.json` 六条密文 + `~/.zcode/cli/log/*.jsonl` 里 484 条真实
+`z.ai` 请求记录），但**没有一个能用的明文凭据**，所以：
+
+- **真机验到的**：两条通道都活着且可达（不带凭据打过去分别回 401，`zcode.z.ai` 是空体、
+  `api.z.ai` 带 `{"error":…"type":"1001"}`）；本机凭据确实是密文；本机发现如实报「导不进来」。
+- **只有证据没有真机**（照实说）：身份块能不能过 3012、`coding-plan` 那条线带 key 能不能
+  出结果、`billing/balance` 的额度数字、模型目录的真实内容。**这四项全部是
+  `source` 强度**（`temp/codearts` 的实测记录），不是本仓的抓包。
+  ⚠ 无凭据时 401 在 3012 **之前**判定，所以连「身份块对不对」的**负向**判据都拿不到——
+  这条限制必须写在这里，免得下次有人以为「跑一下就验过了」。
 
 ## 未定事项
 

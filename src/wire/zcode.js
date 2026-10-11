@@ -20,12 +20,15 @@
  *
  * 3. **失败词表只有一份**：本模块不自己抄一份 quota/credit 正则，而是把判定委托给
  *    `mapStatus()`（它内部用 `failureWords()`）；只有 ZCode 私有的业务码在这里判。
+ *
+ * 本模块里的 ZCode 协议事实（两条通道的端点/凭据、身份块、业务码语义、目录字段）
+ * 借自另一个中文插件（**借的是证据不是代码**），登记见 THIRD_PARTY_NOTICES.md 的「借用的证据」。
  * @module dsh-account-bridge/wire/zcode
  */
 
 import { failureWords } from './failure-words.js'
 import { mapStatus } from './http-error.js'
-import { OFFICIAL_IDENTITY, OFFICIAL_STABLE_SECTIONS, CONTEXT_PREFIX_INTRO, CONTEXT_PREFIX_OUTRO } from './zcode-identity.js'
+import { OFFICIAL_IDENTITY, CONTEXT_PREFIX_INTRO, CONTEXT_PREFIX_OUTRO } from './zcode-identity.js'
 
 // ------------------------------------------------------------------ 端点
 
@@ -135,11 +138,28 @@ export function credentialShape(value) {
  * 另一条腿。抛错会让"这个账号只有 start-plan 凭据"变成一个失败。
  */
 export function credentialsForChannel(auth, channel) {
-  const direct = typeof auth?.access === 'string' && auth.access.trim().length > 0 ? auth.access.trim() : undefined
-  const shape = credentialShape(direct)
-  if (channel === 'coding-plan') return shape === 'api-key' ? direct : undefined
-  if (channel === 'start-plan') return shape !== undefined && shape !== 'api-key' ? direct : undefined
+  const { value, usable, shape } = credentialMaterial(auth)
+  if (!usable) return undefined
+  if (channel === 'coding-plan') return shape === 'api-key' ? value : undefined
+  if (channel === 'start-plan') return shape === 'api-key' ? undefined : value
   return undefined
+}
+
+/**
+ * 账号里那份凭据**材料**的三态：能用 / 不能用（形态不认识）/ 压根没有。
+ *
+ * 为什么要单独一个函数：**「不能用」和「没有」必须分开报**（参考实现记录的教训反着用）。
+ * - `enc:v1:…`（本机 ZCode 客户端那份密文）与 `urn:…`（OAuth 里那种标识）都**不是**令牌。
+ *   把它们当凭据发出去只会换回一个 401，而 401 在本仓是「停这个账号 24 小时」
+ *   （`COOLDOWN.auth`）——用一个**我们明知不认识**的字符串去打上游，代价是账号停一天。
+ * - 而分类上它又**不能**算「请求的问题」（`INVALID_REQUEST` 会不罚账号继续换下一个账号试）：
+ *   每个账号都会一样地失败。所以它必须报 `MISSING_CREDENTIAL`，让用户的动作是**重新粘贴**。
+ */
+export function credentialMaterial(auth) {
+  const raw = typeof auth?.access === 'string' && auth.access.trim().length > 0 ? auth.access.trim() : undefined
+  const shape = credentialShape(raw)
+  const usable = shape === 'api-key' || shape === 'jwt' || shape === 'token'
+  return { value: raw, shape, usable }
 }
 
 /**
@@ -272,18 +292,16 @@ export function buildZcodeHeaders({ deviceMid, appVersion, channel, authorizatio
 // ------------------------------------------------------------------ system 与请求体
 
 /**
- * 官方身份块的**前两块**（`cliPrefix` + `stable` 三段），一句都不能少。
+ * 官方身份块。
  *
- * ⚠ 顺序也不能变：上游检查的是 system 的**前两项**结构。把环境块插在中间会让结构
- * 不匹配 ⇒ 405 + 3012（有冷却惩罚）。
+ * ⚠ **只发一块**：`OFFICIAL_IDENTITY` 本身就是 `cliPrefix + '\n\n' + stable 三段` 的
+ * 拼合（2900 字符，见 `zcode-identity.js` 的 sha256 指纹）。把三段再拆成独立块
+ * 发出去，总长会从 2900 变成 5211——上游的判据是"结构在不在"而不是"块数多少"，
+ * 所以多发不会直接报错，但**我们已经没有逐字节对得上的参照物**了，
+ * 而"与官方一致"正是这个块唯一的价值。初版这里就重发了一遍（自测抓到的）。
  */
 function identityBlocks() {
-  return [
-    { type: 'text', text: OFFICIAL_IDENTITY },
-    // 拆成三段会让上游看到"更多块"，但实测判据只是结构在不在；合并成一块反而
-    // 与 `zcode-identity.ts:73` 的常量口径（42 + 2 + 2856 = 2900）对不齐。
-    ...OFFICIAL_STABLE_SECTIONS.map((text) => ({ type: 'text', text })),
-  ]
+  return [{ type: 'text', text: OFFICIAL_IDENTITY }]
 }
 
 /**
@@ -573,7 +591,3 @@ function tryParse(text) {
     return undefined
   }
 }
-
-// ------------------------------------------------------------------ 复用的翻译层
-
-export { OFFICIAL_IDENTITY, OFFICIAL_STABLE_SECTIONS }

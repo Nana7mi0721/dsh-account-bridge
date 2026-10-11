@@ -942,6 +942,50 @@ export class AccountBridgeAdapter {
 
     let lastError
     let turnedAwayError
+    /**
+     * 「同一个错从每一个账号来」——这种失败不是关于账号的，别拿它罚账号。
+     *
+     * magpie 的 `LESSONS.md` 第 4 条就是这个换来的：一次把「模型或请求内容有问题」误判成
+     * 账号故障，**把池里所有账号一起 rest 了 5 天**。认证类在我们这里停 24 小时
+     * （`COOLDOWN.auth`），是最贵的一档：上游网关抖一下、出口 IP 被拦、或者我们自己的
+     * 请求头出了问题，都会让每个账号各回一个 401/403，于是整池停摆一天，而用户什么也做不了。
+     *
+     * 判据只有一条：**这一轮里 ≥2 个账号都回了 AUTH，而且没有任何账号回过别的东西**。
+     * 只有一个账号时无从比较（它到底是令牌废了还是别的原因，只有它自己说话），照旧罚。
+     * 命中判据就一个也不罚，把错误原样抛给调用方——它看得见那个码，我们也没撒谎说
+     * 「这个账号坏了」。
+     */
+    const authPending = []
+    let nonAuthUpstreamFailure = false
+    /** 把攒着的认证类失败补罚上（只在「别处有证据说明它是关于账号的」时调用）。 */
+    const restAuthPending = () => {
+      for (const entry of authPending.splice(0)) {
+        this.#health.record(family.id, entry.accountId, entry.model, entry.verdict)
+      }
+    }
+    /**
+     * 这一轮结束了，把攒着的认证类失败结清。
+     *
+     * 必须是一个**函数**，不能只在循环后面写一段：最后一个候选失败时，循环体里的
+     * `index + 1 >= ordered.length` 会直接 `throw`，写在循环后面的那段根本走不到——
+     * 而「每个账号都这么说」恰恰是**只有最后一个候选失败时**才成立的情形（第一版就是
+     * 这么写的，于是这条判据从来没生效过，端到端反向验证才发现）。判据里数的是
+     * **不同的账号**，不是失败的次数。
+     */
+    const settleAuthPending = () => {
+      if (new Set(authPending.map((entry) => entry.accountId)).size >= 2 && !nonAuthUpstreamFailure) {
+        this.#log?.warn?.(
+          'account-bridge: %s — all %d accounts tried answered AUTH; resting none of them '
+            + '(one account saying it is evidence about that account, all of them saying it is '
+            + 'usually evidence about the request)',
+          family.id,
+          authPending.length,
+        )
+        authPending.length = 0
+        return
+      }
+      restAuthPending()
+    }
     for (const [index, candidate] of ordered.entries()) {
       const accountId = candidate.account.id
       const pending = []
@@ -1074,6 +1118,9 @@ export class AccountBridgeAdapter {
           error.code = 'EMPTY_RESPONSE'
           throw error
         }
+        // 有账号答出来了 ⇒ 那些说 AUTH 的账号确实是自己坏了：同一个请求它们答不出来，
+        // 而这一位答出来了。现在补罚它们。
+        restAuthPending()
         this.#health.clear(family.id, accountId, model)
         this.#noteUsage(family, accountId)
         if (stickyKey !== undefined) {
@@ -1109,7 +1156,11 @@ export class AccountBridgeAdapter {
         }
         lastError = error
         const verdict = classifyFailure(error, family.id)
-        const recorded = this.#health.record(family.id, accountId, model, verdict)
+        // 认证类先不罚：等这一轮结束，看它是「这个账号坏了」还是「每个账号都这么说」。
+        const deferred = !committed && verdict.reason === 'AUTH'
+        if (deferred) authPending.push({ accountId, model, verdict })
+        if (verdict.reason !== 'AUTH') nonAuthUpstreamFailure = true
+        const recorded = deferred ? 0 : this.#health.record(family.id, accountId, model, verdict)
         // 「还有额度却吃了限流」⇒ 这个账号沉到末尾。额度用尽与欠费不沉（不是我们的问题）。
         if (verdict.backoff === 'rate') this.#sinkAccount(family, accountId)
         this.#log?.warn?.(
@@ -1117,7 +1168,11 @@ export class AccountBridgeAdapter {
           family.id,
           accountId,
           redact(String(error?.code ?? error?.message ?? error)),
-          recorded > 0 ? `, cooling ${Math.round(recorded / 1000)}s` : '',
+          deferred
+            ? ', not resting it until we know whether that is about the account'
+            : recorded > 0
+              ? `, cooling ${Math.round(recorded / 1000)}s`
+              : '',
           committed
             ? 'already streaming — not switching'
             : index + 1 < ordered.length
@@ -1125,12 +1180,20 @@ export class AccountBridgeAdapter {
               : 'no account left',
         )
         if (committed || verdict.action === 'throw') throw error
-        if (index + 1 >= ordered.length) throw error
+        if (index + 1 >= ordered.length) {
+          // 没有下一个候选了——这一轮到此为止，攒着的认证类失败必须**现在**结清，
+          // 否则那条「每个账号都这么说 ⇒ 一个也不罚」的判据永远走不到（`throw` 在它前面）。
+          settleAuthPending()
+          throw error
+        }
       } finally {
         // 槽位要在**这一轮真的结束之后**才还：流读完、报错、或者调用方走了。
         release?.()
       }
     }
+    // 走到这里说明循环是「正常结束」的（例如每个候选都被闸门挡回去了，没有 throw）：
+    // 同样要把攒着的认证类失败结清，判据与上面那个 throw 分支共用一份。
+    settleAuthPending()
     throw turnedAwayError ?? lastError ?? new Error('account-bridge: no account could serve this request')
   }
 

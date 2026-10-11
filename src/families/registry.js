@@ -14,6 +14,7 @@ import { codexFamily } from './codex.js'
 import { commandcodeFamily } from './commandcode.js'
 import { copilotFamily } from './copilot.js'
 import { traeFamily } from './trae.js'
+import { zcodeFamily } from './zcode.js'
 import { genericFamily } from './generic.js'
 import { grokFamily } from './grok.js'
 import { minimaxFamily } from './minimax.js'
@@ -39,6 +40,9 @@ export const FAMILIES = [
   grokFamily,
   copilotFamily,
   traeFamily,
+  // ZCode（智谱）与上面十一族没有同厂关系，但它与 `generic` 的位置有一个硬区别：
+  // 下面那一族是「以上都不适用」的出口，**必须留在最后**，所以新的具体族一律插在它之前。
+  zcodeFamily,
   genericFamily,
 ]
 

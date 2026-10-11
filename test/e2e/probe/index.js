@@ -34,6 +34,7 @@ const ROUTES = [
   'acct-grok',
   'acct-copilot',
   'acct-trae',
+  'acct-zcode',
   'acct-generic',
 ]
 
@@ -182,7 +183,7 @@ export function apply(ctx) {
     const rows = Array.isArray(providers) ? providers : []
     const byId = new Map(rows.map((row) => [row.id ?? row.provider, row]))
     const absent = ROUTES.filter((route) => !byId.has(route))
-    check('十二条 acct-* route 全部注册成 provider', absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
+    check('十三条 acct-* route 全部注册成 provider', absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
     const named = ROUTES.filter((route) => byId.get(route)?.name)
     check('每条 route 都带显示名', named.length === ROUTES.length, `没有名字的：${ROUTES.filter((r) => !byId.get(r)?.name).join(', ')}`)
 
@@ -199,7 +200,7 @@ export function apply(ctx) {
       if (!Number.isInteger(window) || window <= 0) badMeta.push(`${route}: contextWindow=${JSON.stringify(window)}`)
       if (info?.id !== 'e2e-probe-model' || info?.provider !== route) badMeta.push(`${route}: 回显不对 ${JSON.stringify({ id: info?.id, provider: info?.provider })}`)
     }
-    check('十二个族的模型元数据都是宿主能吃的形状', badMeta.length === 0, badMeta.join(' | '))
+    check('十三个族的模型元数据都是宿主能吃的形状', badMeta.length === 0, badMeta.join(' | '))
 
     // ------------------------------------------------------------------ 回环数据面
     const api = async (action, body = {}) => {
@@ -213,11 +214,33 @@ export function apply(ctx) {
       return envelope.value
     }
 
-    // 上一轮留下的账号先清掉：E2E 必须能在同一个 profile 上反复跑。
+    // 「现在池子里每个 e2e 号被停了多久」。
+    //
+    // 为什么必须**在失败刚发生时**读，而不是等一整轮跑完再读：池子在每次成功之后都会调
+    // `src/health.js` 的 `clear()`，而它把这个账号的成员键与账号键**一起删掉**
+    // （`src/health.js:280-284`）。探针在一笔失败后面还有十几笔会成功的请求，四个号轮流
+    // 被答中 ⇒ 冷却被逐个擦干净，最后读 state 时全表都是 `reason: null, minutes: 0`：
+    // 断言照样绿，实际什么都没验（第一版就是这样白跑了两轮，反向验证才发现）。
+    const restsNow = async (why) => {
+      const snapshot = await safe(() => api('state'), `state(${why})`)
+      return (snapshot?.families ?? [])
+        .flatMap((family) => family.accounts ?? [])
+        .filter((account) => String(account.label ?? '').startsWith('e2e-'))
+        .map((account) => ({
+          label: account.label,
+          reason: account.cooldown?.reason ?? null,
+          minutes: account.cooldown?.until ? Math.round((account.cooldown.until - Date.now()) / 60_000) : 0,
+        }))
+    }
+
+    // 上一轮留下的账号先清掉：E2E 必须能在同一个 profile 上反复跑，而且**池里只能有
+    // 这一轮建的这四个号**。只清 `e2e-` 前缀是不够的——早几轮建的号会留在 `generic` 池里，
+    // 于是「这一笔失败落在谁头上」「某个账号被停了多久」这类断言会落到别的号上：
+    // 检查照样绿，实际上什么都没验（第一版就是这样，白跑了一轮）。
     const state0 = await safe(() => api('state'), 'state')
     const leftovers = (state0?.families ?? [])
+      .filter((family) => family.family === 'generic')
       .flatMap((family) => family.accounts ?? [])
-      .filter((account) => String(account.label ?? '').startsWith('e2e-'))
     const remove = tool('account_bridge_accounts_remove')
     for (const account of leftovers) await safe(() => remove.execute({ account: account.id }), `remove(${account.id})`)
     say(`清掉上一轮账号 ${leftovers.length} 个`)
@@ -368,6 +391,35 @@ export function apply(ctx) {
     const paywall = await infer('mock-paywall', 'e2e-paywall')
     check('上游只给一个定价页链接时也算额度，不是「服务器故障」', paywall.failure?.code === 'QUOTA', JSON.stringify(paywall))
 
+    // J2：**每个账号都回同一个 401**。认证类在我们这里停 24 小时
+    // （`COOLDOWN.auth`），是最贵的一档；而「一个账号这么说」与「每个账号都这么说」
+    // 是两件事——后者通常说明问题在这次请求（或者出口 IP），不是账号。magpie 的
+    // `LESSONS.md` 第 4 条就是拿「把所有账号一起 rest 了 5 天」换来的。
+    // 判据与它一样：这一轮 ≥2 个账号都回 AUTH，且没有任何账号回过别的东西
+    // ⇒ 一个也不罚。停号那半条在下面读 state 时一起断言。
+    // 这两条必须**当场**断言（上面刚失败、下面还有十几笔会成功的请求）：
+    // 池子在每次成功之后都会调 `src/health.js` 的 `clear()`，而它把这个账号的冷却整条删掉
+    // ⇒ 等到最后再读 state，全表都是「没有冷却」：断言照样绿，实际什么都没验。
+    // 一小时的界限很宽：额度 30 分钟、限流 1 分钟、退避上限 30 分钟都过得去，24 小时过不去。
+    const afterBilling = await restsNow('after the billing failures')
+    check('那笔 403 没有把账号停掉一整天', afterBilling.every((row) => row.minutes <= 60), JSON.stringify(afterBilling))
+    // 上一条有个前提：**冷却真的被记上了**。如果它读到的永远是空的（第一版就是这样，
+    // 因为 state 那时根本不报冷却），`every(...)` 会在空表上恒真——先证明尺子是准的。
+    check('额度/欠费的冷却确实记到了账号上', afterBilling.some((row) => row.minutes > 0), JSON.stringify(afterBilling))
+
+    const everyAuth = await infer('mock-401-all', 'e2e-401-all')
+    check('401 从每个账号来：宿主看到的仍是 AUTH', everyAuth.failure?.code === 'AUTH', JSON.stringify(everyAuth))
+
+    // J2 的另一半：上面那笔 401 **每个账号都回了**，所以一个都不该被停。
+    // 这一条改坏了会很贵且很安静：`COOLDOWN.auth` 是 24 小时，而「每个账号都这么说」
+    // 在真机上最常见的成因是出口或网关，不是每个令牌同时作废。
+    const afterAuth = await restsNow('after the 401')
+    check(
+      '401 从每个账号来时，一个也没被停（「每个账号都这么说」不是账号的事）',
+      afterAuth.every((row) => row.minutes <= 60),
+      JSON.stringify(afterAuth),
+    )
+
     // ------------------------------------------------------------------ 翻译回显
     // 这一组补的是删掉单元测试时丢掉的那半覆盖：**我们发出去的是什么**，以及
     // **上游给的东西有没有变成宿主认识的样子**。以前由 golden 快照守着
@@ -514,7 +566,26 @@ export function apply(ctx) {
     const state = await safe(() => api('state'), 'state')
     const stateText = JSON.stringify(state ?? null)
     check('回环 state 不外传凭据', !stateText.includes(KEY), 'state 的 JSON 里出现了假上游的密钥')
-    check('state 里有十二个族', (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
+    check('state 里有十三个族', (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
+
+    // ZCode（智谱）专有的一条：它的本机发现**必须说「有凭据但导不进来」**，不能返回空数组。
+    //
+    // 为什么值得单独一条：这一族刻意**不解密** `~/.zcode/v2/credentials.json` 里的
+    // `enc:v1:` 凭据（派生密钥公开可复现 ⇒ 读它等于复制「读别人应用的登录态」的能力）。
+    // 而 `AGENTS.md` 的硬规矩是「**「读不出来」不等于「没有」**」——返回空数组会让用户
+    // 以为本机从没登录过 ZCode，那是把一次**有意的拒绝**说成了**不存在**。
+    // 这条检查断言的是「如实报告」而不是具体文案，所以改文案不会让它假失败。
+    const zcodeRow = byId.get('acct-zcode')
+    const discover = tool('account_bridge_discover')
+    const zcodeScan = await safe(() => discover?.execute?.({ family: 'zcode' }), 'discover(zcode)')
+    const zcodeScanText = typeof zcodeScan === 'string' ? zcodeScan : String(zcodeScan?.content?.[0]?.text ?? zcodeScan ?? '')
+    check(
+      'ZCode 的显示名与本机发现都如实报告',
+      String(zcodeRow?.name ?? '').includes('ZCode') &&
+        zcodeScanText.includes('zcode') &&
+        /有凭据但导不进来|importable/i.test(zcodeScanText),
+      `name=${JSON.stringify(zcodeRow?.name)}；discover=${zcodeScanText.slice(0, 300)}`,
+    )
 
     // 两个腾讯变体必须**看着就是两个东西**：它们共用同一份凭据文件与同一条线协议
     // （`families/workbuddy.js` 的工厂 + 两份产品描述符），所以「显示名撞了」
@@ -537,17 +608,5 @@ export function apply(ctx) {
     const e2eAccounts = accounts.filter((account) => String(account.label ?? '').startsWith('e2e-'))
     check('四个 e2e 账号都在池子里', e2eAccounts.length === 4, `实际 ${e2eAccounts.map((a) => a.label).join(', ')}`)
     check('账号行带状态字段', e2eAccounts.every((account) => typeof account.status === 'string'), JSON.stringify(e2eAccounts.map((a) => ({ id: a.id, status: a.status }))))
-
-    // 上面那笔 403 的**另一半**：如果它被当成 AUTH，账号会被停一整天（`COOLDOWN.auth`
-    // = 24 小时）。所以这里断言的不是「有没有停」，而是「停得没那么久」——
-    // 只看码不看时长，等于让「屏幕上写限流、账号却按欠费冻着」那类漂移重新长回来。
-    // 一小时这个界限很宽：额度 30 分钟、限流 1 分钟、退避上限 30 分钟都过得去，
-    // 而 24 小时过不去。
-    const rests = e2eAccounts.map((account) => ({
-      label: account.label,
-      reason: account.cooldown?.reason ?? null,
-      minutes: account.cooldown?.until ? Math.round((account.cooldown.until - Date.now()) / 60_000) : 0,
-    }))
-    check('那笔 403 没有把账号停掉一整天', rests.every((row) => row.minutes <= 60), JSON.stringify(rests))
   }
 }

@@ -239,6 +239,7 @@ export function registerAccountBridgeRoutes(options) {
     for (const pool of pools) {
       const family = familyById.get(pool.family)
       const attempts = options.broker?.snapshot?.(pool.family)
+      const now = Date.now()
       const accounts = []
       for (const row of pool.accounts) {
         const payload = await store.read(row.id)
@@ -246,12 +247,26 @@ export function registerAccountBridgeRoutes(options) {
         if (withQuota && payload && row.disabled !== true) {
           quota = await quotaOf(family, payload, ctx)
         }
+        /**
+         * **还在生效**的那条冷却，或者没有。
+         *
+         * `row.cooldown` 来自 `CooldownTable.why()`，它在没有生效冷却是会**回落到
+         * 「上一次为什么被停」**——那是给「这个号今早为什么停了」这类问题用的，
+         * 而不是「现在能不能用」。两者混在一起，面板就会对着一个早就恢复的账号
+         * 一直显示「冷却中」，而且说不出停到什么时候、为什么停（用户最想知道的两件事）。
+         * 所以这里按 `until` 判一次，只把生效中的那条报出去。
+         */
+        const cooldown = row.cooldown && Number(row.cooldown.until) > now ? row.cooldown : undefined
         accounts.push(
           publicAccount(
             { ...payload, ...row },
             {
               quota,
-              status: row.cooldown ? 'cooling' : 'ready',
+              status: cooldown ? 'cooling' : 'ready',
+              /** 为什么停、停到什么时候、停在哪个粒度上。没有生效的冷却时整个字段缺席。 */
+              cooldown: cooldown
+                ? { reason: cooldown.reason, scope: cooldown.scope, until: cooldown.until }
+                : undefined,
               /**
                * **实际生效**的两个上限，以及它们是从哪一级来的。
                *
