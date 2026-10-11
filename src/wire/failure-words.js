@@ -40,6 +40,22 @@ const USED_UP_WORDS = /quota|usage.?limit|out of budget|budget (exceeded|exhaust
 /* eslint-enable no-useless-escape */
 
 /**
+ * 「要付费才能用」被上游写成一个**结构字段**，而不是一句人话：
+ * `{"pricingUrl":"https://qoder.com.cn/pricing?client=qoder"}`（Qoder 国内版实测）。
+ *
+ * 来源：dsh-codearts-auth 的 `looksLikeBillingError`（其 `docs/agent-notes/providers-qoder.md`
+ * 的「额度类业务码不是一个值，是一条链」一节，issue IKKJFH）。他们的结论值得照抄——
+ * **判据要认结构字段名，不认主题词**：实测 `balance` / `quota` / 正常讨论定价的正文都不含
+ * 这个键名，所以它足够窄；而它的价值在于**它是第二条件腿**：他们原先只认码值 `110`，
+ * 上游换成 `112` 之后三个判据全 false，落到「可重试」上白退避了 5 次，
+ * **既不换号也不换 provider**，用户看到的是「轮换没生效」。
+ *
+ * 所以我们两条腿都要有：码值那条在本仓是 {@link QODER_RESULT_CODES}（`src/wire/qoder.js`），
+ * 文案那条就是这里——它住在共享词表里，任何族撞上这个字段都能被认出来。
+ */
+const PAYWALL_FIELD = /pricingUrl/i
+
+/**
  * @param {number|undefined} status HTTP 状态
  * @param {string} text 上游原文（我们的 `error.message` 已经内嵌了它）
  * @returns {'credit'|'quota'|'rate'|undefined} 说不出来就是 undefined
@@ -56,7 +72,7 @@ export function failureWords(status, text) {
     return 'credit'
   }
   if (throttled && RATE_WORDS.test(body) && !PLANNED_WORDS.test(body)) return 'rate'
-  if (USED_UP_WORDS.test(body) || (throttled && PLANNED_WORDS.test(body))) return 'quota'
+  if (USED_UP_WORDS.test(body) || PAYWALL_FIELD.test(body) || (throttled && PLANNED_WORDS.test(body))) return 'quota'
   if (throttled) return 'rate'
   return undefined
 }

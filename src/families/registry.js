@@ -1,9 +1,14 @@
 /**
  * 已实现的族登记处。新增一族 = 在这里加一行。
+ *
+ * 「同一个适配器的两个产品变体各占一行」这件事的字段清单借自 dsh-codearts-auth
+ * （**证据**，不是代码），与其它借来的东西一起登记在 `THIRD_PARTY_NOTICES.md`
+ * ——`test/e2e/preflight.mjs` 会强制这句话在场。
  * @module dsh-account-bridge/families/registry
  */
 
 import { agyFamily } from './agy.js'
+import { buddyFamily } from './buddy.js'
 import { claudeFamily } from './claude.js'
 import { codexFamily } from './codex.js'
 import { commandcodeFamily } from './commandcode.js'
@@ -25,7 +30,11 @@ export const FAMILIES = [
   agyFamily,
   minimaxFamily,
   qoderFamily,
+  // 同厂商相邻：WorkBuddy 与 CodeBuddy 是同一个适配器的两个产品变体
+  // （`families/workbuddy.js` 的工厂 + 两份产品描述符），摆在挨着的位置
+  // 才能让「为什么有两个」一眼看见。
   workbuddyFamily,
+  buddyFamily,
   commandcodeFamily,
   grokFamily,
   copilotFamily,

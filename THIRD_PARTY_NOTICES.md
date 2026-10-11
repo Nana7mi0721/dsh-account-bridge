@@ -56,9 +56,26 @@
 
 见文末「只学规格、未借用代码」——AGPL 的来源不进「借用的代码」这一节。
 
+## 借用的证据（协议事实与事故史，不是代码）
+
+这一节的来源**不是代码**：借的是「上游实际怎么回」的观测，以及一次事故的完整因果链。
+原件是中文项目 [dsh-codearts-auth](https://gitee.com/iJetLi/deepseek-harness-codearts/)——
+Gitee 仓库，`LICENSE` 是标准 MIT（`Copyright (c) 2026 Jet`），本地快照在 `temp/codearts`（`git clone --depth 1`）。
+
+一条必须一起说的前提：**它的 README 自陈协议细节与事故史住在不入库的 `implementation-notes.md`，
+所有 `probe-*.mjs` / `verify-*.mjs` 也不在仓库里**。所以下面只引它的**源码注释与 `docs/agent-notes/*.md`**，
+逐条标出处；它自己标了「证据强度不足」的地方，我们照抄那个标注，不替它加码。
+
+| 出处（`temp/codearts/…`） | 用在本仓 | 借了什么 | 证据强度（照抄它的自评） |
+|---|---|---|---|
+| `docs/agent-notes/providers-qoder.md`「额度类业务码**不是一个值，是一条链**」（issue IKKJFH） | `src/wire/failure-words.js`、`src/wire/qoder.js` | ① 额度类业务码**至少是 `110` 与 `112` 两个值**，只认一个之后上游换成 `112` 会让换号**静默失效**（症状：白退避 5 次，既不换号也不换 provider，用户看到的是「轮换没生效」）；② 「要付费才能用」的报文体里带结构字段 `"pricingUrl"`，判据要**认结构字段名、不认主题词**；③ 这类判据必须**两条腿同时在**（码值 + 文案），缺一条换个码值就复发 | `110` 是他们读客户端 obf 产物取到的；**`112` 没有客户端产物证据**（他们本机未装 Qoder 客户端、上游全历史搜 `pricingUrl` 零命中），依据是报文语义（定价页链接＝付费才能用）＋兄弟码同类。他们自己写了「若哪天能拿到客户端产物，欢迎修正 `112` 的语义」 |
+| `src/provider-registry.ts:176-198` | `src/families/registry.js`（CodeBuddy 一族） | 「同一个适配器的两个产品变体」这件事的字段清单：产品码、UA、端点、凭据引用各自随产品切换，而不是复制一整个适配器 | 纯声明式配置，它的两个产品都能真机跑到 |
+| `src/product.ts:326-374`（`CODEBUDDY` 产品配置）、`src/product.ts:230-322`（`CODEBUDDY_FALLBACK_MODELS`）、`src/product.ts:511-551`（`WORKBUDDY`） | `src/wire/buddy.js`（新）、`src/families/buddy.js`（新）、`src/families/workbuddy.js` | CodeBuddy（中国版）这一产品的**协议事实**：`productCode: 'codebuddy'`（`:334`）、`userAgent: 'CodeBuddyIDE/1.106.1'` 且 `userAgentByModelFamily: []`＝中国版只有一条产品线（`:335-337`，注释在 `:337`）、`attributionName: 'CodeBuddy'`（`:338`）、`clientVersion: '1.106.1'`（`:339`）、`appendSessionParams: false`（`:342`）、`knownDomains: ['copilot.tencent.com','www.codebuddy.cn','codebuddy.cn']`（`:363`）、16 条兜底模型（`:230-322`）。**最关键的一条**是 `:345-365` 那段注释给出的 `knownDomains` 语义：凭据里的 `domain` **就是 token 的 `iss` 主机**（登录站 / 认证 realm），而成长中心网页站 `www.workbuddy.cn` 被**刻意**排除在域表外——它不签发 token、永远不作为 `iss` 出现，登记它还会与 `plugin-src/client/backup-convert.js` 的 `providerFromIssuer()`（按「host 含子串 `workbuddy`」分派）撞出**矛盾归属**。本仓 `src/families/workbuddy.js` 的 `domainOwner()` 三段判定就是照这条语义写的（本产品域 / 共用域 / 别家独占域）。**16 条兜底模型的数值一律未改**，只就地翻译了字段名（`maxOutputTokens`→`maxTokens`、`reasoningEfforts`→`efforts`、`defaultReasoningEffort`→`defaultEffort`） | 它的自评逐条照抄在 `src/wire/buddy.js` 的文件头：数据源是 `/v3/config` 的 `craft` agent 白名单并**逐条真实请求验证**；远端另有一批会回 `code=11102 service info not found` 的条目（`glm-4.6/4.7/5.0`、`minimax-m2.5`、`kimi-k2.5/k2.8-preview`、`hunyuan-*`）被它特意排除；`deepseek-v4-flash` 的档位结论**已被它自己推翻**（issue IKJQSH 2026-10-06：服务端确实校验档位枚举，拼错 `banana` 回 HTTP 400，中国版回 `code:11150`），它选择不擅自改既有行为；`glm-5.1` 的 `supportsImages` 与 scoped 端点返回的 `false` 矛盾，它以「实测能看到图」为准。**本仓对上面任何一条都没有复验**：它们是快照，不是本仓的实测 |
+| `src/buddy-adapter.ts:2040-2082` | `src/wire/workbuddy.js` 的 `chatHeaders()`、`src/wire/buddy.js`、`src/families/buddy.js` | 聊天请求头这一组事实：`X-Domain` 要**以产品配置为准、凭据里的 domain 只是登录快照会过期**，且必须用 `\|\|` 不能用 `??`（读出的是**空串不是 undefined**）（`:2048-2052`）；`X-Product` 是**归属名**（产品名），历史实现发成 `SaaS` 会被后台归因不到产品（`:2056-2063`）；`User-Agent` 按**模型族**分档，`userAgentByModelFamily: []` 的产品全部走 IDE UA（`:2067-2070`）；请求打 `${endpoint}/v2/chat/completions`；归属名由 `product` 驱动（`:247`） | 它两个产品都在真机上跑过。**它与本仓既有实现有一处明确冲突，本仓的处置是「分产品、不取齐」**：`X-Product` 的形状由产品描述符的 `sendProductCode` 决定——WorkBuddy 传 `false`（发 `'X-Product': 'SaaS'`，即本仓参考实现在 `copilot.tencent.com` 上跑通的形状），CodeBuddy 传 `true`（发归属名 + `X-Product-Code`）。理由是这条证据指向的是**它的** WorkBuddy 产品（`www.workbuddy.ai`），而本仓的 CN WorkBuddy 打在 `copilot.tencent.com` 上——同一个域上跑的是它的 CodeBuddy 产品，所以这条证据对 CodeBuddy 直接成立、对 WorkBuddy 不能直接搬。**两边都没有本仓自己的抓包证据**（本机没装也没有在跑的客户端进程，`_dsh_research/research/*.md` 里 grep `X-Product` 零命中），翻这个决定只需改那一个布尔。另有一条同源的约束写在 `createBuddyFamily` 的 `productFor(region)`：描述符只描述它自己那一区，否则会把 CN 的站点根与 UA 发给国际版账号 |
+
 ## 计划借用（尚未落地，落地时连同头部注释一起移入上一节）
 
-> 这些行**不受** `test/notices.test.js` 强制，因为文件还不存在。它们记录的是意图，
+> 这些行**不受** `test/e2e/preflight.mjs` 强制，因为文件还不存在。它们记录的是意图，
 > 实现时若改了主意，改这里而不是硬凑。
 
 ### magpie（MIT，Copyright (c) 2026 yetone）

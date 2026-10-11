@@ -46,6 +46,13 @@ const MODELS = [
   // W3 的两条：一个上游说「一周后再来」，一个上游说「余额不足」。
   'mock-429-week',
   'mock-credit',
+  // J1：同一个 403，但**文案说的是钱**。腾讯系实测会这么回（另一个独立实现的取证），
+  // 而 403 我们曾经一律当 AUTH ⇒ 好号被停 24 小时、宿主显示成「API 密钥无效」。
+  // 它与 `mock-cf-403` 是一对：同样的状态码，区别只在说了什么。
+  'mock-403-credit',
+  // 403 + 只有结构字段 `pricingUrl`（「要付费才能用」）：报文里没有任何钱字，
+  // 认不出来就会被当成服务器故障白退避。与 `mock-403-credit` 成对。
+  'mock-paywall',
   // W6：把上游看见的 key 原样放进回答里。账号各用一把 key 的时候，
   // 「这次是谁答的」就有了上游侧的物证，不用去猜池子的内部状态。
   'mock-whoami',
@@ -349,6 +356,27 @@ function awkwardReply(model, response) {
   if (model === 'mock-cf-403') {
     response.writeHead(403, { 'content-type': 'text/html; charset=utf-8' })
     response.end(HTML_PAGE)
+    return true
+  }
+  // J1：403 + **文案是硬证据**的那一类（腾讯系实测：`403 + 积分不足`、`403 + insufficient
+  // permissions to access this resource`）。状态码说「没权限」，正文说「没钱」——
+  // 我们要按正文走：它决定的是「停 30 分钟还是 24 小时」。
+  // 与上面那条 HTML 的 403 成对：状态码一样，只有正文不同。
+  if (model === 'mock-403-credit') {
+    response.writeHead(403, { 'content-type': 'application/json' })
+    response.end(
+      JSON.stringify({ error: { code: 112, message: 'insufficient balance 余额不足，请充值' } }),
+    )
+    return true
+  }
+  // 「要付费才能用」——上游不说人话，只在报文体里给一个**结构字段** `pricingUrl`
+  // （Qoder 国内版实测原样：`{"pricingUrl":"https://qoder.com.cn/pricing?client=qoder"} (112/model_error)`）。
+  // 注意这条报文里**一个钱字都没有**：认不出来它就会被当成「服务器故障」白退避，
+  // 既不换号也不换 provider（另一个插件就是这么被抓到的，issue IKKJFH）。
+  // 它同时是 403：所以这条也在验「403 先看它说了什么」。
+  if (model === 'mock-paywall') {
+    response.writeHead(403, { 'content-type': 'application/json' })
+    response.end(JSON.stringify({ error: { code: 112, message: '{"pricingUrl":"https://qoder.com.cn/pricing?client=qoder"}' } }))
     return true
   }
   // W3-1：429，但上游自己说「一周后再来」。我们要**只信一小时**（magpie #147：

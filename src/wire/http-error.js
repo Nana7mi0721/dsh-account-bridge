@@ -10,7 +10,9 @@
  * 顺序是有意义的：
  * - `408 / 504` 必须在 `>= 500` **之前**判，否则 504 永远落不到 `TIMEOUT`；
  * - `400 + context` 要在 `>= 500` 之前，但它本来就不可能是 5xx；
- * - 401/403 先判，因为带 `quota` 字样的 403 仍然是鉴权问题，不是额度问题。
+ * - 401 先判，因为 401 只可能是鉴权问题；
+ * - 403 **先看它说了什么**再定：说「没钱 / 没额度」的 403 是额度问题，不是鉴权问题
+ *   （见下面那段注释，这是一个会停号 24 小时的真缺陷）。
  * @module dsh-account-bridge/wire/http-error
  */
 
@@ -59,7 +61,25 @@ const AUTH_DETAIL = /invalid_grant|invalid_token|invalid_client|unauthorized_cli
 /** HTTP 状态 + 错误文本 → 失败码。 */
 export function mapStatus(status, detail = '') {
   const text = String(detail).toLowerCase()
-  if (status === 401 || status === 403) return 'AUTH'
+  if (status === 401) return 'AUTH'
+  if (status === 403) {
+    // 403 里也有一类**文案本身就是硬证据**的：腾讯系实测会回 403 + 「积分不足」/「余额不足」
+    // （另一个独立实现 dsh-codearts-auth 的取证，见 THIRD_PARTY_NOTICES.md 的
+    // 「借用的证据 → dsh-codearts-auth」）。
+    //
+    // 这一条为什么值钱：403 在本函数里等于 `AUTH`，而 `AUTH` 在 `src/health.js` 里是
+    // **停整个账号 24 小时**（`COOLDOWN.auth`），宿主还会把这行显示成语义全错的
+    // 「API 密钥无效」。一个好号只因为上游用 403 说了句「没额度」就被停一天，
+    // 是最难查的那类故障：屏幕上说密钥坏了，账号其实是被额度冻着。
+    //
+    // 判据只认**硬证据**：`failureWords()` 在非 429/5xx 的状态下要求命中更窄的词
+    // （`BROKE_WORDS` 那一支，或 `USED_UP_WORDS`），见 `./failure-words.js`。
+    // 所以「说了别的什么」的 403 仍然落回 `AUTH`——没有证据就不改判，也不猜。
+    const said = failureWords(status, text)
+    if (said === 'credit') return 'ACCOUNT_QUOTA'
+    if (said === 'quota') return 'QUOTA'
+    return 'AUTH'
+  }
   if (AUTH_DETAIL.test(text)) return 'AUTH'
   if (status === 402) return 'ACCOUNT_QUOTA'
   if (status === 429) {

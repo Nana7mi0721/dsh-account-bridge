@@ -3,7 +3,7 @@
 把**已经登录的订阅账号**池化成 DSH 里的一组 provider。不是「再填一个 API Key」的插件：
 它复用本机客户端的登录态（ChatGPT 订阅、Claude Pro/Max、Antigravity、MiniMax Code、Qoder、
 CodeBuddy、CommandCode、Grok、GitHub Copilot、Trae），加上一个通用兜底族收任意
-OpenAI / Anthropic 兼容端点，一共十一条 `acct-*` route。多个账号同一个账号池，谁坏了换谁。
+OpenAI / Anthropic 兼容端点，一共十二条 `acct-*` route。多个账号同一个账号池，谁坏了换谁。
 
 这一份是给在这里写代码的 agent（人和模型都算）看的规矩。读完就能开工；更细的东西在 `docs/`。
 
@@ -47,13 +47,14 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
   之后每次约一分钟。装在 `test/e2e/.home`（已 gitignore），**不动你自己的 `~/.dsh`**。
 - 宿主不在默认位置时：`DSH_DESKTOP`（安装目录）或 `DSH_HOST_EXE` / `DSH_HOST_CLI`；
   换装目录：`BRIDGE_E2E_HOME`；宿主里没有 web-app 时可 `BRIDGE_E2E_WEBAPP_VERSION` 指定版本。
-- 探针在宿主里做事，有四条宿主契约必须遵守，见下。
+- 探针在宿主里做事，有五条宿主契约必须遵守，见下。
 - 假上游是**刻意难伺候**的：Anthropic 那条路只发 `data:` 不发 `event:`；不认 `stream_options`；
   不认 `cache_control`；不认 Claude Code 的身份块；还专门有几个「坏模型」
-  （先吐思考再报错、返回一个 HTML 页面、403 的 Cloudflare 页、429 说「一周后再来」、429 说「余额不足」）。
+  （先吐思考再报错、返回一个 HTML 页面、403 的 Cloudflare 页、403 说「余额不足」、
+  403 只给一个定价页链接、429 说「一周后再来」、429 说「余额不足」）。
   它是验收台，不是便利设施——**不要为了让自己那关过而把它改宽容**。
 
-## 四条宿主契约（都是踩出来的）
+## 五条宿主契约（都是踩出来的）
 
 1. `ctx.inject([...], cb)` 的回调里**抛出去是静默的**：探针会一声不响地停在半路。
    整段必须包 try/catch，并且无论如何都要把报告落盘。
@@ -68,6 +69,11 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
    助手轮还带 `source: { kind: 'model', provider, model }`，缺了宿主会在 `source.replayState` 上抛。
    ——`ctx` 是 `src/index.js` 那个 `familyContext`，**它的 `get` 是通往宿主服务的唯一门**；
    曾经它连 `get` 都没有，于是图片与 CommandCode 的凭据源被静默废掉了一整轮。
+5. **服务只有两扇门：`ctx.inject([...], cb)` 与 `ctx.get(name)`。** 静态 `export const inject = []`
+   必须保持空数组——静态声明一个当前 composition 里不存在的服务，会让**整个插件不加载**
+   （惰性 `inject` 才是「等它出现」）。也不要写 `ctx.someService`：拿不到时它是 `undefined`，
+   而 `undefined` 的下一站是「那件事静默没做」。另一个中文插件为少声明一个依赖吃过一次事故：
+   宿主里人家的 `ctx.remote.session` 抛错，症状是徽标永久不显示且**零报错**。
 
 ## 目录
 
@@ -77,7 +83,7 @@ node test/e2e/harness.mjs --quiet # 同上，不转发宿主输出
 | `src/pool.js` | 账号池与适配器：选号、换号、失败归类、额度、冷却、诊断账本 |
 | `src/select.js` / `src/affinity.js` / `src/gate.js` | 按额度排序 / 会话粘性 / 每分钟与并发闸门 |
 | `src/health.js` / `src/wire/failure-words.js` | 失败分类与「两套通道共用一份词表」 |
-| `src/families/*.js` | 十一个族，一族一个文件；`registry.js` 里的顺序就是界面顺序 |
+| `src/families/*.js` | 十二个族，一族一个文件；`registry.js` 里的顺序就是界面顺序 |
 | `src/wire/*.js` | 协议翻译层（Anthropic / Responses / Chat Completions / SSE / 各家的私有信封） |
 | `src/api.js` / `src/tools.js` / `src/commands.js` / `src/client.js` | 回环数据面 / 工具面 / `/pool` 命令 / 设置面板 |
 | `src/login/` | 登录中介与回环回调 |

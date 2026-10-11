@@ -23,6 +23,32 @@ import { httpError } from './http-error.js'
 
 export const ID = 'workbuddy'
 
+/**
+ * 产品身份。
+ *
+ * 一个产品 = 一家厂商里的一套「我们像谁」的配置：端点、产品码、UA、请求头里的
+ * 归属名。CodeBuddy（中国版）与 WorkBuddy 是同一条线协议的两个产品变体，
+ * 差异**全部**收在这个对象里，而不是把整份 wire 复制一遍。
+ *
+ * 这也是 `src/families/qoder.js` 与 `src/families/qodercn.js` 在本仓的先例
+ * （见 `THIRD_PARTY_NOTICES.md` 的「借用的证据」一节）。
+ *
+ * @typedef {object} BuddyProduct
+ * @property {string} id 本仓内部标识，同时是凭据记录键的一部分
+ * @property {string} noun 写进日志与提示的产品名（面向人的那种写法）
+ * @property {'cn'|'global'} region 没有 domain 的凭据按哪个区域走
+ * @property {string} productCode `X-Product-Code` 的值
+ * @property {string} chatUserAgent 对话请求的 `User-Agent`
+ * @property {string} clientVersion `X-IDE-Version`
+ * @property {string} attributionName `X-IDE-Type` / `X-IDE-Name` / `X-Product`
+ * @property {boolean} sendProductCode 是否按产品码报身份（见 `productIdentity()`）：
+ *   `true` 发 `X-Product: <归属名>` + `X-Product-Code`；`false` 只发 `X-Product: SaaS`（历史形状）
+ * @property {string} catalogUserAgent 目录请求的 `User-Agent`（决定上游下发哪份花名册）
+ * @property {string} refreshSource `X-Auth-Refresh-Source` 的值
+ * @property {string} origin `Origin` / `Referer` 的站点根
+ * @property {string[]} knownDomains 这个产品的凭据里会出现的 domain
+ */
+
 // ---------------------------------------------------------------- 常量
 
 /**
@@ -40,6 +66,34 @@ export const FALLBACK_APP_VERSION = '5.5.2'
 /** 目录里读不到上下文窗口时的保守值（不是上游声明，见族层 modelInfo 的注释）。 */
 export const DEFAULT_CONTEXT_WINDOW = 128_000
 export const DEFAULT_MAX_TOKENS = 8_192
+
+/**
+ * WorkBuddy 的产品身份（CN 区）。
+ *
+ * 这里的每个值都与本文件原有硬编码逐字相同——参数化是**搬家**，不是改行为。
+ * 国际版（`www.workbuddy.ai`）暂时仍由 `region` 分支承担，没有独立的 product 对象：
+ * 它的 UA 是 App 形而 CN 是 CLI 形，差异比一个产品对象能表达的更大。
+ */
+export const WORKBUDDY_PRODUCT = Object.freeze({
+  id: 'workbuddy',
+  noun: 'WorkBuddy',
+  region: 'cn',
+  productCode: 'workbuddy',
+  chatUserAgent: 'WorkBuddy/5.5.6 WorkBuddy/5.5.6',
+  clientVersion: FALLBACK_CN_APP_VERSION,
+  attributionName: 'WorkBuddy',
+  catalogUserAgent: CLIENT_UA,
+  refreshSource: 'workbuddy',
+  origin: 'https://copilot.tencent.com',
+  knownDomains: ['copilot.tencent.com'],
+  /**
+   * **`false`：保持历史形状。** 本族在 `copilot.tencent.com` 上跑通的参考实现发的是
+   * `X-Product: SaaS`（不带 `X-Product-Code`）；codearts 说那样后台「归因不到产品」，
+   * 但它的 WorkBuddy 产品指向 `www.workbuddy.ai`，不是我们这条路径 ⇒ 不能直接搬。
+   * 两边都没有我们的抓包证据，所以**不拿老路径去赌**，只让新产品用新形状。
+   */
+  sendProductCode: false,
+})
 
 /** 对话与计费是两套域名，按区域选（`src/upstream.ts:143-145`）。 */
 export const CHAT_BASE = Object.freeze({
@@ -134,6 +188,21 @@ export function chatBase(region) {
   return region === 'global' ? CHAT_BASE.global : CHAT_BASE.cn
 }
 
+/**
+ * 这个产品的区域：产品配置说了算，凭据里的 `domain` 只在没有产品时兜底。
+ *
+ * 顺序不是随手写的（codearts `src/buddy-adapter.ts:2048-2052` 的注释）：凭据里的
+ * domain 是**登录那一刻的快照**，会过期；产品配置是这次请求真正想打的网关。
+ * 反过来读会让一个换了域的账号一直打旧网关。
+ *
+ * @param {import('./workbuddy.js').BuddyProduct|undefined} product
+ * @param {string} [domain]
+ */
+export function regionOfProduct(product, domain) {
+  if (product !== undefined && product !== null) return product.region
+  return regionOf(domain)
+}
+
 export function billingBase(region) {
   return region === 'global' ? BILLING_BASE.global : BILLING_BASE.cn
 }
@@ -207,16 +276,46 @@ export function catalogUserAgent(region) {
 
 // ---------------------------------------------------------------- 请求头
 
-/** 所有请求共用的打底头（`src/upstream.ts:374-382`）。 */
-export function commonHeaders(region) {
-  const origin = originReferer(region)
+/**
+ * 所有请求共用的打底头（`src/upstream.ts:374-382`）。
+ *
+ * `product` 是**可选的尾参**，不传就是 WorkBuddy 原样：这样 workbuddy 那个族的
+ * 调用点一个都不用改，而 CodeBuddy 能在这里换掉自己的站点根与身份串。
+ *
+ * @param {'cn'|'global'} region
+ * @param {import('./workbuddy.js').BuddyProduct} [product]
+ */
+export function commonHeaders(region, product) {
+  const origin = product?.origin ?? originReferer(region)
   return {
     Accept: 'application/json, text/plain, */*',
     'X-Requested-With': 'XMLHttpRequest',
     Origin: origin,
     Referer: `${origin}/`,
-    'User-Agent': CLIENT_UA,
+    'User-Agent': product?.catalogUserAgent ?? CLIENT_UA,
   }
+}
+
+/**
+ * 产品标识头。**两种形状，由产品描述符的 `sendProductCode` 选一种**：
+ *
+ * - `false`（**历史形状**）：只发 `X-Product: SaaS`。本仓的 WorkBuddy CN 参考实现
+ *   就是这样在 `copilot.tencent.com` 上跑通的，本文件原先也是硬编码这一个值。
+ * - `true`：发归属名 + 产品码（`X-Product: CodeBuddy` / `X-Product-Code: codebuddy`）。
+ *   依据是 codearts 的 `src/buddy-adapter.ts:2056-2063`：那里写着 `X-Product` 是
+ *   **归属名**，历史实现发 `SaaS` 会让后台把请求归因不到产品。
+ *
+ * ⚠️ **两边都没有本仓自己的抓包证据**，而且它们指的未必是同一条路径：codearts 的
+ * WorkBuddy 产品指向 `www.workbuddy.ai`，不是我们这条 `copilot.tencent.com`，
+ * 所以它那条证据不能直接搬到 WorkBuddy 上。因此：**新产品用新形状**（CodeBuddy
+ * 没有历史负担，而且 codearts 的产品码已经报给同一台后端），**WorkBuddy 保持原样**。
+ * 这是一个可以随时翻的决定，要改就改描述符里那一个布尔，别在这里猜第三个字面量。
+ */
+function productIdentity(product, attribution) {
+  if (product?.sendProductCode === true) {
+    return { 'X-Product': attribution, 'X-Product-Code': product.productCode }
+  }
+  return { 'X-Product': 'SaaS' }
 }
 
 /**
@@ -227,33 +326,34 @@ export function commonHeaders(region) {
  *
  * **安全红线：对话请求绝不携带 refresh token**（`src/upstream.ts:396`）。
  */
-export function chatHeaders(auth, region) {
+export function chatHeaders(auth, region, product) {
   const uid = typeof auth?.uid === 'string' ? auth.uid : ''
   const enterpriseId = typeof auth?.enterpriseId === 'string' ? auth.enterpriseId : ''
   const domain = typeof auth?.domain === 'string' ? auth.domain : ''
-  const version = clientVersion(region)
+  const version = product?.clientVersion ?? clientVersion(region)
+  const attribution = product?.attributionName ?? 'WorkBuddy'
   return {
-    ...commonHeaders(region),
-    'User-Agent': chatUserAgent(region),
+    ...commonHeaders(region, product),
+    'User-Agent': product?.chatUserAgent ?? chatUserAgent(region),
     'Content-Type': 'application/json',
     Authorization: `Bearer ${auth?.accessToken ?? ''}`,
     ...(uid === '' ? { 'X-No-User-Id': '1' } : { 'X-User-Id': uid }),
     ...(enterpriseId === '' ? { 'X-No-Enterprise-Id': '1' } : { 'X-Enterprise-Id': enterpriseId }),
     ...(domain === '' ? { 'X-No-Department-Info': '1' } : { 'X-Domain': domain }),
-    'X-IDE-Type': 'WorkBuddy',
-    'X-IDE-Name': 'WorkBuddy',
+    'X-IDE-Type': attribution,
+    'X-IDE-Name': attribution,
     'X-IDE-Version': version,
-    'X-Product': 'SaaS',
+    ...productIdentity(product, attribution),
   }
 }
 
 /** 刷新请求头（`src/upstream.ts:411-421`）：**不带 Authorization**，令牌在 `X-Refresh-Token` 里。 */
-export function refreshHeaders(auth, region) {
+export function refreshHeaders(auth, region, product) {
   const enterpriseId = typeof auth?.enterpriseId === 'string' ? auth.enterpriseId : ''
   return {
-    ...commonHeaders(region),
+    ...commonHeaders(region, product),
     'X-Refresh-Token': auth?.refreshToken ?? '',
-    'X-Auth-Refresh-Source': 'workbuddy',
+    'X-Auth-Refresh-Source': product?.refreshSource ?? 'workbuddy',
     ...(enterpriseId === '' ? {} : { 'X-Enterprise-Id': enterpriseId }),
   }
 }
@@ -278,16 +378,23 @@ export function billingHeaders(auth) {
   }
 }
 
-/** 目录请求头（`src/upstream.ts:702-712`）：国际版才带 `X-Requested-With` / `X-Product`。 */
-export function catalogHeaders(auth, region) {
-  const international = region === 'global'
+/**
+ * 目录请求头（`src/upstream.ts:702-712`）：国际版才带 `X-Requested-With` / `X-Product`。
+ *
+ * **判据是「国际版」或「这个产品自己报产品码」**，不是「传了 product 对象」：
+ * 产品标识头见 `productIdentity()`——WorkBuddy 传了 product 也仍是历史形状，
+ * 它的 CN 目录不该因为代码重构而多出三个头。
+ */
+export function catalogHeaders(auth, region, product) {
+  const attribution = product?.attributionName ?? 'SaaS'
+  const international = region === 'global' || product?.sendProductCode === true
   return {
     Authorization: `Bearer ${auth?.accessToken ?? ''}`,
     Accept: 'application/json',
-    Origin: originReferer(region),
-    Referer: `${originReferer(region)}/`,
-    'User-Agent': catalogUserAgent(region),
-    ...(international ? { 'X-Requested-With': 'XMLHttpRequest', 'X-Product': 'SaaS' } : {}),
+    Origin: product?.origin ?? originReferer(region),
+    Referer: `${product?.origin ?? originReferer(region)}/`,
+    'User-Agent': product?.catalogUserAgent ?? catalogUserAgent(region),
+    ...(international ? { 'X-Requested-With': 'XMLHttpRequest', ...productIdentity(product, attribution) } : {}),
   }
 }
 
@@ -648,5 +755,62 @@ export function parseEnterpriseCredits(envelope) {
     remain: Math.max(0, limit - used),
     size: limit,
     ...(cycleResetTime === undefined ? {} : { cycleResetTime }),
+  }
+}
+
+// ---------------------------------------------------------------- 模型元数据
+
+/**
+ * 记录最近一次成功读到的目录，供 `resolveModel` 用。
+ *
+ * 按模型 id 存：不同区域对同一个 id 的窗口偶尔不同，这里以最后一次成功读到的
+ * 为准，**不装作知道得更多**。表满就整个丢掉——它只是缓存，丢了顶多退到兜底值。
+ *
+ * 这个 Map 原来住在 `families/workbuddy.js` 里；产品变体化之后两个族各要一份，
+ * 所以搬到这里，由工厂每次调用 `rememberCatalog` 时传自己的那一份进去。
+ */
+export function createCatalogMemory() {
+  const cache = new Map()
+  return {
+    remember(models) {
+      if (cache.size > 200) cache.clear()
+      for (const model of models) cache.set(model.id, model)
+    },
+    get(id) {
+      return cache.get(id)
+    },
+  }
+}
+
+/**
+ * 目录行（或兜底行）→ 契约 §5.3 的模型元数据。不知道的值保守，不编。
+ *
+ * `fallback` 只在目录行缺失时生效，而且**逐字段**兜底：一份目录行里
+ * `contextWindow` 可能有、`maxTokens` 可能没有，取整行兜底会把已有的真值也盖掉。
+ */
+export function modelInfo(entry, provider, fallback = {}) {
+  const id = typeof entry?.id === 'string' && entry.id !== '' ? entry.id : ''
+  const efforts = Array.isArray(entry?.efforts)
+    ? entry.efforts
+      .filter((value) => typeof value === 'string' && value !== '')
+      .map((value) => ({ id: value, name: EFFORT_NAMES[value] ?? value }))
+    : (Array.isArray(fallback.efforts) ? fallback.efforts : [])
+      .filter((value) => typeof value === 'string' && value !== '')
+      .map((value) => ({ id: value, name: EFFORT_NAMES[value] ?? value }))
+  const defaultEffort = typeof entry?.defaultEffort === 'string' && efforts.some((item) => item.id === entry.defaultEffort)
+    ? entry.defaultEffort
+    : undefined
+  const contextWindow = entry?.contextWindow ?? fallback.contextWindow
+  const maxTokens = entry?.maxTokens ?? fallback.maxTokens
+  const supportsImages = entry?.supportsImages ?? fallback.supportsImages
+  return {
+    provider,
+    id,
+    name: typeof entry?.name === 'string' && entry.name !== '' ? entry.name : (fallback.name ?? id),
+    context: { contextWindow: contextWindow ?? DEFAULT_CONTEXT_WINDOW },
+    defaultMaxTokens: maxTokens ?? DEFAULT_MAX_TOKENS,
+    toolUpdate: 'in-history',
+    inputModalities: supportsImages === true ? ['text', 'image'] : ['text'],
+    ...(efforts.length === 0 ? {} : { reasoning: { efforts, ...(defaultEffort === undefined ? {} : { defaultEffort }) } }),
   }
 }

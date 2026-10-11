@@ -30,7 +30,7 @@ const SYSTEM_REMINDER_CLOSE = '</system-reminder>'
  * `code_execution_tool_result`…）会照常开一个**空文本块**——不开的话整条流的
  * 下标就乱了——但那是一次静默的内容损失，所以每见一次报一条诊断。
  *
- * 这里刻意不做 RelayKit 那套 hosted-tool 全矩阵：我们 11 个族里只有 copilot 与
+ * 这里刻意不做 RelayKit 那套 hosted-tool 全矩阵：我们这些族里只有 copilot 与
  * grok 沾得到服务端工具，为它们建一张中央表是拿维护成本换一个没人用的功能。
  */
 const RENDERED_BLOCK_TYPES = new Set(['text', 'thinking', 'tool_use'])

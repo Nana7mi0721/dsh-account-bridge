@@ -11,6 +11,10 @@
  * **签名算法上游没有官方文档**（只有结果码有，见 {@link QODER_RESULT_CODES}），
  * 这一份是照逆向实现复刻的，未经本机真机验证（本机没装 Qoder）。
  *
+ * 结果码表 `112` 那一条与「要付费才能用」的判据借自另一个中文插件（**借的是证据不是代码**），
+ * 出处、它的证据强度自评与那条事故的因果链见 `THIRD_PARTY_NOTICES.md` 的
+ * 「借用的证据 → dsh-codearts-auth」。
+ *
  * 三处**笔记没写、从原始源码里核出来**的坑，都写在各自函数上方：
  * ① `Cosy-Clienttype` 到底该是 5 还是 10；② body 还要过一遍 WAF 自定义编码；
  * ③ 签名路径要剥掉 `/algo` 前缀（这条笔记里有，但很容易连带把 HTTP 路径也剥了）。
@@ -19,6 +23,7 @@
  */
 
 import { createCipheriv, createHash, publicEncrypt, randomUUID } from 'node:crypto'
+import { failureWords } from './failure-words.js'
 import { readSse } from './sse.js'
 import { mergeUsageNonZero } from './usage.js'
 
@@ -524,8 +529,18 @@ function effortsOf(entry) {
  * 上游 `/algo/api/v2/model/list` → 统一的模型条目。
  *
  * 只收 `enable === true` 的；`key` 是模型 id（请求里 `model_config.key` 用它）。
- * context window 三级回退：唯一 `is_default` 的 `context_config.token_count`
- * → `max_input_tokens` → `undefined`（交给保守默认值，**不编**）。
+ *
+ * **context window 取 `context_config` 档位表的最高档，不是 `max_input_tokens`。**
+ * 这条口径来自另一个插件对官方客户端的复刻与真机实测（出处见 `THIRD_PARTY_NOTICES.md`
+ * 的「借用的证据 → dsh-codearts-auth」），三条证据互相印证：
+ * ① 官方客户端判定窗口的实现是「先在档位表里查成员资格，查不到才退回 `max_input_tokens`」；
+ * ② 两者**经常自相矛盾**：CN 的 `dmodel` 声明 `max_input_tokens = 96000`，档位表却到 1M；
+ * ③ 真机上往 `dmodel` 发 **852,951** 个输入 token 是被收下的 ⇒ 96K 那个值不成立，
+ *    「档位表最高档」才是服务端真的接受的上限。
+ * 档位表为空的条目（如 `auto`）才退回 `max_input_tokens`；两者都没有就给 `undefined`，
+ * 交给保守默认值——**不编**。
+ *
+ * 我们自己这份是照逆向写的，本机没装 Qoder ⇒ 这条口径**未经我们真机验证**。
  */
 export function normalizeQoderModels(payload) {
   const list = Array.isArray(payload?.assistant) ? payload.assistant : []
@@ -535,15 +550,14 @@ export function normalizeQoderModels(payload) {
     const id = entry.key ?? entry.model ?? entry.id
     if (typeof id !== 'string' || id.length === 0) continue
     const contexts = Array.isArray(entry.context_config) ? entry.context_config : []
-    const preferred = contexts.filter((item) => item?.is_default === true)
-    const defaultContext = (preferred.length === 1 ? preferred[0] : undefined)?.token_count
+    const tiers = contexts.map((item) => Number(item?.token_count)).filter((value) => Number.isFinite(value) && value > 0)
     const supportsImages = entry.is_vl === true
     const efforts = effortsOf(entry)
     out.push({
       id,
       name: typeof entry.name === 'string' && entry.name.length > 0 ? entry.name : id,
-      contextWindow: Number.isFinite(defaultContext)
-        ? defaultContext
+      contextWindow: tiers.length > 0
+        ? Math.max(...tiers)
         : Number.isFinite(entry.max_input_tokens) ? entry.max_input_tokens : undefined,
       maxTokens: Number.isFinite(entry.max_output_tokens) ? entry.max_output_tokens : DEFAULT_MAX_TOKENS,
       inputModalities: supportsImages ? ['text', 'image'] : ['text'],
@@ -561,9 +575,17 @@ export function normalizeQoderModels(payload) {
  * 这是「快照」不是「发现」：上游目录接口是真接口，正常路径下都会用它；
  * 这里只在目录请求失败时兜住，让用户至少能发一个请求。
  * 6 条 key 来自上游客户端的默认档位（`catalog.ts` 的 `defaultModels`）。
+ *
+ * ⚠️ **只改过 `auto` 一个数（180K → 200K）**：另一个插件实测的 CN 目录里 `auto`
+ * 就是 200K（且它没有档位表，所以退回 200K 是那条规则算出来的，不是抄的）。
+ * 其余几条**故意没动**：它们来自**另一套 key**（`ultimate`/`performance`/`efficient`/`lite`
+ * 是档位式命名，对方实测的 CN 目录用的是 `qmodel`/`dmodel`/`qfmodel` 这套 key），
+ * 两套表不能逐行对号入座。对方那张 CN 表里 `efficient` 一类的模型窗口是 **1M**
+ * （档位表最高档），而这里写的是 180K —— 这是**低估**（更早压缩历史，不会发不出去），
+ * 但它是我们这份快照里最可疑的一条，**等拿到真账号时第一个复核它**。
  */
 export const FALLBACK_MODELS = [
-  { id: 'auto', name: 'Auto', contextWindow: 180_000, maxTokens: DEFAULT_MAX_TOKENS, inputModalities: ['text', 'image'], isReasoning: false, efforts: [], source: 'system' },
+  { id: 'auto', name: 'Auto', contextWindow: 200_000, maxTokens: DEFAULT_MAX_TOKENS, inputModalities: ['text', 'image'], isReasoning: false, efforts: [], source: 'system' },
   { id: 'ultimate', name: 'Ultimate', contextWindow: 1_000_000, maxTokens: DEFAULT_MAX_TOKENS, inputModalities: ['text', 'image'], isReasoning: true, efforts: [], source: 'system' },
   { id: 'performance', name: 'Performance', contextWindow: 1_000_000, maxTokens: DEFAULT_MAX_TOKENS, inputModalities: ['text', 'image'], isReasoning: false, efforts: [], source: 'system' },
   { id: 'efficient', name: 'Efficient', contextWindow: 180_000, maxTokens: DEFAULT_MAX_TOKENS, inputModalities: ['text', 'image'], isReasoning: false, efforts: [], source: 'system' },
@@ -631,10 +653,17 @@ export function parseQoderQuota(payload) {
  *
  * 只有 quota 与 auth 两类在这里；其余码按 HTTP 状态走就够了，
  * 猜一个没见过的码比让它按状态码兜底更糟。
+ *
+ * `112` 是**唯一没有官方文档背书**的一条：另一个插件在 issue IKKJFH 里报了它
+ * （`{"pricingUrl":"…/pricing?client=qoder"} (112/model_error)`），并指出「额度类业务码
+ * 不是一个值，是一条链」——他们原先只认 `110`，于是 `112` 落进「可重试」，
+ * 白退避 5 次、既不换号也不换 provider。按兄弟码（110/113…122 全是额度）归 `quota`。
+ * 取证细节与证据强度见 `THIRD_PARTY_NOTICES.md` 的「借用的证据 → dsh-codearts-auth」。
  */
 export const QODER_RESULT_CODES = Object.freeze({
   105: { family: 'auth', name: 'Login or access token expired' },
   110: { family: 'quota', name: 'Daily usage limit reached' },
+  112: { family: 'quota', name: 'Paid plan required (upstream answers with a pricing page link)' },
   113: { family: 'quota', name: 'Usage quota exhausted' },
   114: { family: 'quota', name: 'Free-trial account limit reached' },
   115: { family: 'quota', name: 'Free-user quota reached' },
@@ -713,11 +742,19 @@ export function classifyQoderFailure(response, text) {
     return finish('AUTH')
   }
   if (documented?.family === 'auth') return finish('AUTH', { qoderCode: documented.code })
-  if (status === 402 || documented?.family === 'quota') {
-    return finish('ACCOUNT_QUOTA', documented?.family === 'quota' ? { qoderCode: documented.code } : undefined)
-  }
+  // 402 是「钱」，业务码里的 quota 家族是「这份套餐到点了」——在本仓它们是**不同的码**
+  // （`ACCOUNT_QUOTA` 停 30 分钟、`QUOTA` 停 15 分钟）。原先这两件事共用一行，
+  // 于是同一个业务码在 403 下报 `QUOTA`、在信封里报 `ACCOUNT_QUOTA`，同一个原因两条路各说各话。
+  if (status === 402) return finish('ACCOUNT_QUOTA')
+  if (documented?.family === 'quota') return finish('QUOTA', { qoderCode: documented.code })
   if (status === 429) {
-    return finish(lower.includes('quota') || lower.includes('usage limit') || lower.includes('extra usage') ? 'QUOTA' : 'RATE_LIMIT')
+    // 词表只有一份（`failureWords`，与 `mapStatus` 用的是同一个）。这里原先手写了一版
+    // `quota|usage limit|extra usage`，它不认「余额不足 / 欠费」——那会把欠费说成限流，
+    // 而这两个码停号时长差一倍（30 分钟对 1 分钟起、上限 30 分钟）。
+    const said = failureWords(status, detail)
+    if (said === 'credit') return finish('ACCOUNT_QUOTA')
+    if (said === 'quota') return finish('QUOTA')
+    return finish('RATE_LIMIT')
   }
   if (documented?.family === 'context') return finish('CONTEXT_WINDOW_EXCEEDED', { qoderCode: documented.code })
   if (status === 400 && lower.includes('context')) return finish('CONTEXT_WINDOW_EXCEEDED')

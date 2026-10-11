@@ -29,6 +29,7 @@ const ROUTES = [
   'acct-minimax',
   'acct-qoder',
   'acct-workbuddy',
+  'acct-codebuddy',
   'acct-commandcode',
   'acct-grok',
   'acct-copilot',
@@ -181,7 +182,7 @@ export function apply(ctx) {
     const rows = Array.isArray(providers) ? providers : []
     const byId = new Map(rows.map((row) => [row.id ?? row.provider, row]))
     const absent = ROUTES.filter((route) => !byId.has(route))
-    check('十一条 acct-* route 全部注册成 provider', absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
+    check('十二条 acct-* route 全部注册成 provider', absent.length === 0, `缺 ${absent.join(', ')}；实际 ${[...byId.keys()].join(', ')}`)
     const named = ROUTES.filter((route) => byId.get(route)?.name)
     check('每条 route 都带显示名', named.length === ROUTES.length, `没有名字的：${ROUTES.filter((r) => !byId.get(r)?.name).join(', ')}`)
 
@@ -198,7 +199,7 @@ export function apply(ctx) {
       if (!Number.isInteger(window) || window <= 0) badMeta.push(`${route}: contextWindow=${JSON.stringify(window)}`)
       if (info?.id !== 'e2e-probe-model' || info?.provider !== route) badMeta.push(`${route}: 回显不对 ${JSON.stringify({ id: info?.id, provider: info?.provider })}`)
     }
-    check('十一个族的模型元数据都是宿主能吃的形状', badMeta.length === 0, badMeta.join(' | '))
+    check('十二个族的模型元数据都是宿主能吃的形状', badMeta.length === 0, badMeta.join(' | '))
 
     // ------------------------------------------------------------------ 回环数据面
     const api = async (action, body = {}) => {
@@ -355,6 +356,18 @@ export function apply(ctx) {
     const week = await infer('mock-429-week', 'e2e-week')
     check('上游说「一周后再来」时归类为 RATE_LIMIT，而不是额度用尽', week.failure?.code === 'RATE_LIMIT', JSON.stringify(week))
 
+    // 同一个 403，正文说「余额不足」。旧行为是「403 一律 AUTH」⇒ 停号 **24 小时**、
+    // 宿主还把它显示成「API 密钥无效」；而 AUTH 与额度类的差别就是 24 小时与 30 分钟。
+    // 停号时长那半条在下面读 state 时一起断言（`为什么` 与 `停多久` 必须同时改对）。
+    const forbidden = await infer('mock-403-credit', 'e2e-403')
+    check('403 说「余额不足」时归类为 ACCOUNT_QUOTA，而不是 AUTH', forbidden.failure?.code === 'ACCOUNT_QUOTA', JSON.stringify(forbidden))
+
+    // 同一个 403，但报文体里**一个钱字都没有**，只有一个结构字段 `pricingUrl`
+    // （Qoder 国内版实测原样）。认不出来它就会被当成服务器故障白退避——另一个插件
+    // 就是这么丢了换号的（issue IKKJFH）。这条验的是共享词表的那条「文案腿」。
+    const paywall = await infer('mock-paywall', 'e2e-paywall')
+    check('上游只给一个定价页链接时也算额度，不是「服务器故障」', paywall.failure?.code === 'QUOTA', JSON.stringify(paywall))
+
     // ------------------------------------------------------------------ 翻译回显
     // 这一组补的是删掉单元测试时丢掉的那半覆盖：**我们发出去的是什么**，以及
     // **上游给的东西有没有变成宿主认识的样子**。以前由 golden 快照守着
@@ -501,7 +514,18 @@ export function apply(ctx) {
     const state = await safe(() => api('state'), 'state')
     const stateText = JSON.stringify(state ?? null)
     check('回环 state 不外传凭据', !stateText.includes(KEY), 'state 的 JSON 里出现了假上游的密钥')
-    check('state 里有十一个族', (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
+    check('state 里有十二个族', (state?.families ?? []).length === ROUTES.length, `实际 ${(state?.families ?? []).length} 个`)
+
+    // 两个腾讯变体必须**看着就是两个东西**：它们共用同一份凭据文件与同一条线协议
+    // （`families/workbuddy.js` 的工厂 + 两份产品描述符），所以「显示名撞了」
+    // 或「只注册进来一个」是这两族最容易出的错，而它在上一条计数检查里看不见
+    // ——计数只数个数，不数名字。名字撞了用户就没法在设置页里分辨该往哪一族导入。
+    const variantNames = ['acct-workbuddy', 'acct-codebuddy'].map((route) => String(byId.get(route)?.name ?? ''))
+    check(
+      '两个腾讯变体（WorkBuddy / CodeBuddy）是两条独立且有各自名字的 provider',
+      variantNames[0].includes('WorkBuddy') && variantNames[1].includes('CodeBuddy') && variantNames[0] !== variantNames[1],
+      JSON.stringify(variantNames),
+    )
 
     const diagnostics = await safe(() => api('diagnostics'), 'diagnostics')
     check('诊断面可用', typeof diagnostics?.requests === 'number', JSON.stringify(diagnostics)?.slice(0, 200))
@@ -513,5 +537,17 @@ export function apply(ctx) {
     const e2eAccounts = accounts.filter((account) => String(account.label ?? '').startsWith('e2e-'))
     check('四个 e2e 账号都在池子里', e2eAccounts.length === 4, `实际 ${e2eAccounts.map((a) => a.label).join(', ')}`)
     check('账号行带状态字段', e2eAccounts.every((account) => typeof account.status === 'string'), JSON.stringify(e2eAccounts.map((a) => ({ id: a.id, status: a.status }))))
+
+    // 上面那笔 403 的**另一半**：如果它被当成 AUTH，账号会被停一整天（`COOLDOWN.auth`
+    // = 24 小时）。所以这里断言的不是「有没有停」，而是「停得没那么久」——
+    // 只看码不看时长，等于让「屏幕上写限流、账号却按欠费冻着」那类漂移重新长回来。
+    // 一小时这个界限很宽：额度 30 分钟、限流 1 分钟、退避上限 30 分钟都过得去，
+    // 而 24 小时过不去。
+    const rests = e2eAccounts.map((account) => ({
+      label: account.label,
+      reason: account.cooldown?.reason ?? null,
+      minutes: account.cooldown?.until ? Math.round((account.cooldown.until - Date.now()) / 60_000) : 0,
+    }))
+    check('那笔 403 没有把账号停掉一整天', rests.every((row) => row.minutes <= 60), JSON.stringify(rests))
   }
 }

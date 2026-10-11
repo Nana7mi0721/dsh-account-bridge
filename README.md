@@ -1,11 +1,13 @@
 # dsh-account-bridge
 
-把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、Qoder、CommandCode…）
-统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，而不是每家用一个插件。
+把**账号级**上游订阅（ChatGPT/Codex、Antigravity、Claude、WorkBuddy、CodeBuddy、Qoder、
+CommandCode…）统一桥接进 DeepSeek Harness 的插件：一个插件、一份账号表、一套调度，
+而不是每家用一个插件。
 
-> 状态：**P6 完成**——骨架 + 11 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
-> `workbuddy` / `commandcode` / `grok` / `copilot` / `trae` / `generic`）+ 本机账号统一发现 +
-> 设置页账号池面板 + `/pool` 命令族。11 条 route 已在真实 DSH 宿主里验证可见
+> 状态：**P6 完成**——骨架 + 12 个族（`codex` / `claude` / `agy` / `minimax` / `qoder` /
+> `workbuddy` / `codebuddy` / `commandcode` / `grok` / `copilot` / `trae` / `generic`）+
+> 本机账号统一发现 +
+> 设置页账号池面板 + `/pool` 命令族。12 条 route 已在真实 DSH 宿主里验证可见
 > （provider / 模型目录 / 登录流 / 工具面 / 面板数据面），route 互不撞车。
 > **真机跑通过推理的族**：`agy`、`minimax`、`generic`。其余族**没有可用的真账号**，
 > 属于「真机未验」，逐族的取舍见下面的「族的状态与取舍」。
@@ -73,6 +75,7 @@ DSH 0.2.0 起，宿主**内置**了 `@deepseek-ai/dsh-llm-pi-ai`，已经能登�
 | 亲和记录落盘 `$DSH_HOME/storages/account_bridge.json`，重启不失忆 | ✅ 真机验证（换一个宿主进程仍认原来的账号） |
 | 把 Qoder 家族注册成 provider route（`acct-qoder`，显示名 `Qoder (China)`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Qoder、没有 PAT） |
 | 把 WorkBuddy 家族注册成 provider route（`acct-workbuddy`） | ⚠️ 端到端验到 route 与元数据；**真机仅验到第一条**（本机凭据是 5.6 的密文） |
+| 把 CodeBuddy（腾讯，中国版）家族注册成 provider route（`acct-codebuddy`，显示名 `CodeBuddy（腾讯）`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机验到的只有「发现」这一半：本机那份 5.6 密文凭据被它按文件里的 `auth.domain` 认成自己的（`www.codebuddy.cn`），并被如实报成「密文，请改用手动粘贴令牌」。**没有可用的明文令牌，一次真实推理都没跑过** |
 | 把 CommandCode 家族注册成 provider route（`acct-commandcode`） | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
 | **设置页里的「账号池」面板**：看每个族的账号、起登录、导入、停用、续期、设代理、删号、查额度、扫本机 | ⚠️ 数据面真机验证（路由 / 信封 / 错误码 / 不外传凭据）；**面板本身从未在真浏览器里看过**（面板上**没有**改流量上限的控件，用 `/pool limits` 或 `account_bridge_limits`） |
 | **`/pool` 命令族**：`/pool` 看池子、`/pool check` 真查额度、`/pool unfreeze` 解冻冷却中的账号 | ✅ 真机验证（在宿主里 `commands.find(undefined,'pool')` 解出并跑通全部六个输入） |
@@ -373,6 +376,71 @@ export ELECTRON_RUN_AS_NODE=1
 "<安装目录>/DeepSeek Harness.exe" "<安装目录>/resources/app.asar/dsh/node_modules/@deepseek-ai/dsh-desktop-host/lib/cli.js" <参数...>
 ```
 
+## 一个厂商两个产品：WorkBuddy 与 CodeBuddy
+
+腾讯这套桌面端/IDE 接口被两个产品用着：国际版 **WorkBuddy**（`www.workbuddy.ai`）与
+中国版 **CodeBuddy**（`www.codebuddy.cn`）。它们是**同一条线协议**——同样的
+`/v2/chat/completions`、同样的 SSE、同样的信包头——所以本仓把适配器写成**一份工厂**
+（`src/families/workbuddy.js` 的 `createBuddyFamily(spec)`），两个族各交一份产品描述符：
+
+| | `workbuddy` | `codebuddy` |
+|---|---|---|
+| route | `acct-workbuddy` | `acct-codebuddy` |
+| 显示名 | `WorkBuddy（腾讯 CodeBuddy）` | `CodeBuddy（腾讯）` |
+| `User-Agent` | 按模型族分档（国际版是 App 形） | `CodeBuddyIDE/1.106.1`（中国版只有一条产品线） |
+| 产品描述符 | `src/wire/workbuddy.js` 的 `WORKBUDDY_PRODUCT`（**只描述 CN 那一区**） | `src/wire/buddy.js` 的 `CODEBUDDY_PRODUCT` |
+| 产品标识头 | 历史形状：只发 `X-Product: SaaS` | `X-Product: CodeBuddy` + `X-Product-Code: codebuddy` |
+| 凭据变体 | 2 条（CN / 国际版 AI 桌面端） | 1 条（中国桌面端） |
+
+**两个产品的 `X-Product` 形状不同，这是有意的**（翻这个决定只需改描述符里的一个布尔）。
+两边的证据互相矛盾，而且指的未必是同一条路径：本仓 WorkBuddy CN 的参考实现在
+`copilot.tencent.com` 上发的是 `X-Product: SaaS`，而 `temp/codearts` 说 `X-Product` 是归属名、
+发 `SaaS` 会让后台**归因不到产品**（`src/buddy-adapter.ts:2056-2063`）——但 codearts 的
+WorkBuddy 产品指向 `www.workbuddy.ai`，不是我们这条 CN 路径，所以它那条证据对 CodeBuddy
+直接成立、对 WorkBuddy 不能直接搬。**两边都没有本仓自己的抓包证据**，于是：新产品（CodeBuddy）
+用新形状，老产品（WorkBuddy）保持原样。要翻就是 `WORKBUDDY_PRODUCT.sendProductCode` 那一个布尔。
+
+还有一条同样来自踩坑的规则：**产品描述符只描述它自己那一区**（`createBuddyFamily` 里的
+`productFor(region)`）。WorkBuddy 的描述符装的是 CN 那一套（站点根、CLI 形 UA、版本号），
+无脑把它传给国际版账号，会把国际版的身份换成 CN 的——拿改前的实现逐组对比过：
+CN 的 9 组头逐字相同，**国际版的 8 组全变**。
+
+**归属判据是凭据里的 `auth.domain`，不是文件名。** 这一条是踩出来的：
+两个产品**共用同一个凭据目录**（`CodeBuddyExtension/Data/Public/auth/`），而中国版客户端
+把 CodeBuddy 的凭据写成了 `workbuddy-desktop.info`——和 WorkBuddy 的 CN 变体**同名**。
+所以本仓两个族都读同一个目录，靠读出来的 `auth.domain` 分家：
+
+- `www.codebuddy.cn` / `codebuddy.cn` ⇒ CodeBuddy 的 realm（`docs` 证据：`src/product.ts:363`）
+- `www.workbuddy.ai` / `workbuddy.ai` / `auth.workbuddy.ai` / `api.workbuddy.ai` ⇒ WorkBuddy 的
+  realm（`src/product.ts:549`）
+- **`copilot.tencent.com` 两家共用**（两份产品配置的 `knownDomains` 都含它）。共用域谁都收：
+  一个域分不出两个产品时，宁可报「可导入」让上游去 401，也不凭猜把一份真凭据判给别家。
+- **认不出来的域保守保留**（不当成「别家」）。误留的代价是「导入了但请求 401」，
+  误删的代价是「用户的真凭据被插件说成不存在」——后者贵得多。
+
+判到别家的那一份**照样报出来**，只是 `importable: false` 并写清「这是谁的 realm、该去哪一族导入」。
+这台机器上就能看见这条路径（真机实测）：
+
+```
+[workbuddy] importable=false
+    …\workbuddy-desktop.info 里的登录域是 www.codebuddy.cn，那是「CodeBuddy（腾讯）」的 realm。
+    本族收的是 copilot.tencent.com。要在本插件里用它，请到「CodeBuddy（腾讯）」导入。
+
+[codebuddy] importable=false
+    …\workbuddy-desktop.info 里的令牌是 AES-256-GCM 密文（CodeBuddy 5.6 起的静态加密，suite 1）…
+    请改用这一族的「手动粘贴令牌」登录方式，或者在 5.6 之前的版本上登录后再导入。
+```
+
+两条实现细节值得记着（都是踩过才写对的）：
+
+- **域判定要放在「密文」判定之前，而且密文那一支也必须带上解析出来的文档。** 一开始
+  `classifyAuthDocument()` 在 `encrypted` 分支只回 `{format, wrapped}`，于是
+  `documentDomain(undefined)` 得到空串、归属判定一律落空：本该说「这是别家的」的凭据
+  被说成了「密文，解不开」。错话比沉默更像回事——用户会以为 WorkBuddy 解得开它。
+  `auth.domain` 是**明文**字段，和 token 是不是密文无关。
+- **后缀匹配要写两条。** `domainMatches()` 用 `domain === 模式 || domain.endsWith('.' + 模式)`，
+  所以 `www.codebuddy.cn` **不会**被 `codebuddy.cn` 命中。只写 apex 会漏掉本机那一份。
+
 ## 目录结构
 
 ```
@@ -405,6 +473,7 @@ src/
     replay.js         上游要求「带回来」的协议状态（思考签名 / encrypted_content）
     qoder.js          Qoder 私有信封 + COSY 签名 + WAF body 编码（纯函数）
     workbuddy.js      WorkBuddy 私有层（信包、身份模仿头、额度三态）
+    buddy.js          CodeBuddy 的产品描述符（同一适配器的另一个产品变体）
     commandcode.js    CommandCode 三传输协商（cli / provider-chat / provider-messages）
     grok.js           Grok Responses 线（两个计费口径的端点评址 + 指纹头）
     copilot.js        Copilot 设备码 + editor-version 炸弹 + 目录映射
@@ -419,7 +488,8 @@ src/
     agy.js            Antigravity 族（驱动本机 agy CLI）
     minimax.js        MiniMax Code 族（直连 mcode 网关 + 令牌写回桌面端）
     qoder.js          Qoder 族（PAT → jobToken，私有信封 + COSY 签名）
-    workbuddy.js      WorkBuddy 族（只读借用桌面端凭据）
+    workbuddy.js      WorkBuddy / CodeBuddy 两个腾讯变体的工厂（只读借用桌面端凭据）
+    buddy.js          CodeBuddy（腾讯，中国版）族（产品描述符 + 发现规则）
     commandcode.js    CommandCode 族（四源凭据回退 + 三传输）
     grok.js           Grok 族（默认走订阅口径的 cli-chat-proxy）
     copilot.js        Copilot 族（设备码；非公开接口，随时可能失效）
@@ -850,6 +920,7 @@ node test/e2e/harness.mjs --quiet  # 同上，宿主输出不外泄
 | `generic` | `acct-generic` | ✅ 真机验证（对着一个假端点两条方言各跑通一次） |
 | `qoder` | `acct-qoder` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Qoder、没有 PAT） |
 | `workbuddy` | `acct-workbuddy` | ⚠️ 端到端验到 route 与元数据；**真机仅验到第一条**（本机凭据是 5.6 的密文，解不开） |
+| `codebuddy` | `acct-codebuddy` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**。真机只验到「发现」：本机那份密文凭据被它按 `auth.domain` 认成自己的，并如实报成「密文，走手动粘贴」。没有一个明文令牌，**一次真实推理都没跑过** |
 | `commandcode` | `acct-commandcode` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没有 CommandCode 账号） |
 | `grok` | `acct-grok` | ⚠️ 端到端验到 route 与元数据；**真机推理未验**（本机没装 Grok CLI，也没有订阅） |
 | `copilot` | `acct-copilot` | ⚠️ 端到端验到 route 与元数据；**真机零验证**（本机没有 Copilot 订阅） |
