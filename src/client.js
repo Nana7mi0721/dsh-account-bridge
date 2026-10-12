@@ -392,7 +392,16 @@ window.__ModuleLoader__.load({
 
       const onLogin = async (family, method) => {
         const answer = await run(`login:${family}`, 'login', { family, method })
-        if (answer.ok) setNotice(`已发起 ${family} 的登录，按提示在浏览器里完成即可（这个面板会自动跟到结束）。`)
+        if (answer.ok) {
+          openAuthorizationPage(answer.value?.login)
+          setNotice(`已发起 ${family} 的登录，按提示在浏览器里完成即可（这个面板会自动跟到结束）。`)
+        }
+      }
+
+      /** 把回答送回给正在等它的族。送出之后要紧跟着重新看一次 `state`（`run` 已经做了）。 */
+      const onAnswer = async (family, value) => {
+        const answer = await run(`answer:${family}`, 'answer', { family, value })
+        if (answer.ok) setNotice('已把回答送回去，接着看这一步的结果。')
       }
 
       const onDiscover = async (family) => {
@@ -556,6 +565,16 @@ window.__ModuleLoader__.load({
                 )
               : null,
 
+            // 族正在等人回答（`state` 里的 `login.prompt`）。就放在状态那一行的下面。
+            family.login?.prompt
+              ? h(LoginPrompt, {
+                  key: 'prompt',
+                  prompt: family.login.prompt,
+                  busy,
+                  onSubmit: (value) => void onAnswer(family.family, value),
+                })
+              : null,
+
             accounts.length === 0
               ? h(
                   'div',
@@ -660,10 +679,35 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 把授权页交给系统浏览器。
+     *
+     * 用户点的是「在浏览器里登录」，所以面板得**自己**开这一页：只把 URL 画成一个链接
+     * 等于让人再点一次，而那条路上没有任何东西会替他开（用户就是这么报的：
+     * 「点击按钮后没用正常跳转浏览器进入登录页面」）。
+     *
+     * 桌面版把 `window.open` 拦成 `shell.openExternal`（系统浏览器），网页版就是新开的
+     * 标签页 —— 宿主自己的 markdown 链接走的正是同一条路。实测登录接口 **99ms** 就把
+     * URL 交回来，所以这里仍然落在浏览器的「用户手势」窗口里，不会被弹窗拦截吃掉。
+     * 真被拦了也不是死路：下面照样画着「打开授权页面」那个链接。
+     */
+    function openAuthorizationPage(login) {
+      const url = login?.url
+      if (typeof url !== 'string' || !/^https?:\/\//i.test(url)) return
+      try {
+        window.open(url, '_blank', 'noopener,noreferrer')
+      } catch {
+        // 弹窗拦截器抛错不影响面板：链接还在。这里吞掉是因为「开不了浏览器」
+        // 不是这个面板能修的事，而把异常抛到渲染里会把整块面板打白。
+      }
+    }
+
     /** 登录状态一行字。 */
     function loginStatusText(login) {
       switch (login.status) {
         case 'running':
+          // 有问题是**最先要说**的事：这时流程停着等人，下面那一行在等一个答案。
+          if (login.prompt) return '这条登录在等你回答下面的问题。'
           return login.message ?? (login.url ? '等待你在浏览器里完成授权…' : '正在启动登录流程…')
         case 'authorized':
           return `登录成功${login.accountId ? `，账号 ${login.accountId} 已入池` : ''}。`
@@ -713,6 +757,79 @@ window.__ModuleLoader__.load({
       )
     }
 
+    /**
+     * 登录中间族问的一个问题（粘贴令牌 / 填 baseURL / 选区域）。
+     *
+     * 面板是**唯一**能回答它的入口：工具与命令行那边没有人可以打字，只会收到一句
+     * 「去设置界面做」。所以这里必须真的把答案送回去（`answer` 动作）——只画一行提示
+     * 是不行的，那样按钮按下去会永远停在「正在启动登录流程…」。
+     */
+    function LoginPrompt({ prompt, busy, onSubmit }) {
+      const [value, setValue] = React.useState('')
+      const options = Array.isArray(prompt.options) ? prompt.options : []
+      // 密钥的问题**不回显**。`kind` 是原始声明，`secret` 是快照给的便利字段——
+      // 两个都认，免得面板因为少一个字段就把令牌明晃晃地画在屏幕上。
+      const secret = prompt.secret === true || prompt.kind === 'secret'
+      const submit = (answer) => {
+        setValue('')
+        void onSubmit(answer)
+      }
+      return h(
+        'div',
+        { className: 'dab-prompt' },
+        h(
+          'span',
+          { className: 'mac-text-callout dab-prompt__ask' },
+          prompt.message || (prompt.kind === 'select' ? '选一个：' : '填一个值：'),
+        ),
+        // 选择题：点哪个就是答案，不用再按一次提交。
+        options.length > 0
+          ? h(
+              'span',
+              { className: 'dab-prompt__options' },
+              ...options.map((option) =>
+                h(
+                  Button,
+                  {
+                    key: option.value,
+                    size: 'small',
+                    disabled: busy !== undefined,
+                    onClick: () => submit(option.value),
+                  },
+                  option.label ?? option.value,
+                ),
+              ),
+            )
+          : [
+              h(
+                'label',
+                { key: 'field', className: 'mac-input-wrap dab-field dab-prompt__field' },
+                h('span', null, secret ? '粘贴凭据' : '填写'),
+                h('input', {
+                  className: 'mac-input',
+                  type: secret ? 'password' : 'text',
+                  value,
+                  placeholder: secret ? '粘贴到这里（不回显）' : '',
+                  onChange: (event) => setValue(event.target.value),
+                  onKeyDown: (event) => {
+                    if (event.key === 'Enter' && value.length > 0) submit(value)
+                  },
+                }),
+              ),
+              h(
+                Button,
+                {
+                  key: 'send',
+                  tone: 'primary',
+                  disabled: busy !== undefined || value.length === 0,
+                  onClick: () => submit(value),
+                },
+                '提交',
+              ),
+            ],
+      )
+    }
+
     // ---------------------------------------------------------------- 样式
 
     /**
@@ -752,633 +869,633 @@ window.__ModuleLoader__.load({
 /* ---- token 子集：212 个自定义属性 ---- */
 :root {
   /* Type — the kit's stack and the five weights */
-  --mac-font-sans: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif
-  --mac-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace
-  --mac-weight-medium: 500
-  --mac-weight-bold: 700
+    --mac-font-sans: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --mac-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --mac-weight-medium: 500;
+  --mac-weight-bold: 700;
   /* Type — the eleven styles (leading variants are compositional: calc(line ± 2px)) */
-  --mac-text-large-title-size: 26px
-  --mac-text-large-title-line: 32px
-  --mac-text-large-title-weight: 400
-  --mac-text-large-title-weight-em: 700
-  --mac-text-title1-size: 22px
-  --mac-text-title1-line: 26px
-  --mac-text-title1-weight: 400
-  --mac-text-title1-weight-em: 700
-  --mac-text-title2-size: 17px
-  --mac-text-title2-line: 22px
-  --mac-text-title2-weight: 400
-  --mac-text-title2-weight-em: 700
-  --mac-text-title3-size: 15px
-  --mac-text-title3-line: 20px
-  --mac-text-title3-weight: 400
-  --mac-text-title3-weight-em: 600
-  --mac-text-headline-size: 13px
-  --mac-text-headline-line: 16px
-  --mac-text-headline-weight: 700
-  --mac-text-headline-weight-em: 800
-  --mac-text-body-size: 13px
-  --mac-text-body-line: 16px
-  --mac-text-body-weight: 400
-  --mac-text-body-weight-em: 600
-  --mac-text-callout-size: 12px
-  --mac-text-callout-line: 15px
-  --mac-text-callout-weight: 400
-  --mac-text-callout-weight-em: 600
-  --mac-text-subheadline-size: 11px
-  --mac-text-subheadline-line: 14px
-  --mac-text-subheadline-weight: 400
-  --mac-text-subheadline-weight-em: 600
-  --mac-text-footnote-size: 10px
-  --mac-text-footnote-line: 13px
-  --mac-text-footnote-weight: 400
-  --mac-text-footnote-weight-em: 600
-  --mac-text-caption1-size: 10px
-  --mac-text-caption1-line: 13px
-  --mac-text-caption1-weight: 400
-  --mac-text-caption1-weight-em: 600
-  --mac-text-caption2-size: 10px
-  --mac-text-caption2-line: 13px
-  --mac-text-caption2-weight: 400
-  --mac-text-caption2-weight-em: 600
+    --mac-text-large-title-size: 26px;
+  --mac-text-large-title-line: 32px;
+  --mac-text-large-title-weight: 400;
+  --mac-text-large-title-weight-em: 700;
+  --mac-text-title1-size: 22px;
+  --mac-text-title1-line: 26px;
+  --mac-text-title1-weight: 400;
+  --mac-text-title1-weight-em: 700;
+  --mac-text-title2-size: 17px;
+  --mac-text-title2-line: 22px;
+  --mac-text-title2-weight: 400;
+  --mac-text-title2-weight-em: 700;
+  --mac-text-title3-size: 15px;
+  --mac-text-title3-line: 20px;
+  --mac-text-title3-weight: 400;
+  --mac-text-title3-weight-em: 600;
+  --mac-text-headline-size: 13px;
+  --mac-text-headline-line: 16px;
+  --mac-text-headline-weight: 700;
+  --mac-text-headline-weight-em: 800;
+  --mac-text-body-size: 13px;
+  --mac-text-body-line: 16px;
+  --mac-text-body-weight: 400;
+  --mac-text-body-weight-em: 600;
+  --mac-text-callout-size: 12px;
+  --mac-text-callout-line: 15px;
+  --mac-text-callout-weight: 400;
+  --mac-text-callout-weight-em: 600;
+  --mac-text-subheadline-size: 11px;
+  --mac-text-subheadline-line: 14px;
+  --mac-text-subheadline-weight: 400;
+  --mac-text-subheadline-weight-em: 600;
+  --mac-text-footnote-size: 10px;
+  --mac-text-footnote-line: 13px;
+  --mac-text-footnote-weight: 400;
+  --mac-text-footnote-weight-em: 600;
+  --mac-text-caption1-size: 10px;
+  --mac-text-caption1-line: 13px;
+  --mac-text-caption1-weight: 400;
+  --mac-text-caption1-weight-em: 600;
+  --mac-text-caption2-size: 10px;
+  --mac-text-caption2-line: 13px;
+  --mac-text-caption2-weight: 400;
+  --mac-text-caption2-weight-em: 600;
   /* Labels — the alpha ladder (never a set of greys) */
-  --mac-label-primary: rgba(0, 0, 0, 0.85)
-  --mac-label-secondary: rgba(0, 0, 0, 0.5)
-  --mac-label-tertiary: rgba(0, 0, 0, 0.25)
-  --mac-label-quaternary: rgba(0, 0, 0, 0.1)
+    --mac-label-primary: rgba(0, 0, 0, 0.85);
+  --mac-label-secondary: rgba(0, 0, 0, 0.5);
+  --mac-label-tertiary: rgba(0, 0, 0, 0.25);
+  --mac-label-quaternary: rgba(0, 0, 0, 0.1);
   /* Labels on accent — the Selected column of appearance.*.Fills */
-  --mac-label-on-accent: #FFFFFF
-  --mac-label-on-accent-secondary: rgba(255, 255, 255, 0.55)
+    --mac-label-on-accent: #FFFFFF;
+  --mac-label-on-accent-secondary: rgba(255, 255, 255, 0.55);
   /* Surface fills — the fill ramp (not the label Fills) */
-  --mac-fill-primary: rgba(0, 0, 0, 0.1)
-  --mac-fill-secondary: rgba(0, 0, 0, 0.08)
-  --mac-fill-tertiary: rgba(0, 0, 0, 0.05)
-  --mac-fill-quaternary: rgba(0, 0, 0, 0.03)
-  --mac-fill-quinary: rgba(0, 0, 0, 0.02)
+    --mac-fill-primary: rgba(0, 0, 0, 0.1);
+  --mac-fill-secondary: rgba(0, 0, 0, 0.08);
+  --mac-fill-tertiary: rgba(0, 0, 0, 0.05);
+  --mac-fill-quaternary: rgba(0, 0, 0, 0.03);
+  --mac-fill-quinary: rgba(0, 0, 0, 0.02);
   /* Spacing — DERIVED, not a token (NAMING.md §9, references/04-metrics.md) */
-  --mac-space-4: 4px
-  --mac-space-6: 6px
-  --mac-space-8: 8px
-  --mac-space-10: 10px
-  --mac-space-12: 12px
-  --mac-space-16: 16px
-  --mac-space-20: 20px
-  --mac-space-24: 24px
-  --mac-space-32: 32px
+    --mac-space-4: 4px;
+  --mac-space-6: 6px;
+  --mac-space-8: 8px;
+  --mac-space-10: 10px;
+  --mac-space-12: 12px;
+  --mac-space-16: 16px;
+  --mac-space-20: 20px;
+  --mac-space-24: 24px;
+  --mac-space-32: 32px;
   /* Surfaces, lines and borders */
-  --mac-window-bg: #FFFFFF
-  --mac-separator: rgba(60, 60, 67, 0.29)
+    --mac-window-bg: #FFFFFF;
+  --mac-separator: rgba(60, 60, 67, 0.29);
   /* Accent families — twelve families, accent is blue */
-  --mac-accent: #0088FF
-  --mac-destructive: #FF383C
+    --mac-accent: #0088FF;
+  --mac-destructive: #FF383C;
   /* Control fills, content area — Active|Inactive x On|Off x Idle|Clicked|Disabled */
-  --mac-control-off-idle: rgba(0, 0, 0, 0.1)
-  --mac-control-on-idle: #0088FF
+    --mac-control-off-idle: rgba(0, 0, 0, 0.1);
+  --mac-control-on-idle: #0088FF;
   /* Control fills, over glass — the other appearance set (never blended) */
-  --mac-control-glass-off-idle: rgba(0, 0, 0, 0.15)
-  --mac-control-glass-off-clicked: rgba(0, 0, 0, 0.19)
-  --mac-control-glass-on-idle: linear-gradient(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.05)), linear-gradient(#0078F0, #0078F0)
-  --mac-control-glass-on-clicked: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(#0078F0, #0078F0)
+    --mac-control-glass-off-idle: rgba(0, 0, 0, 0.15);
+  --mac-control-glass-off-clicked: rgba(0, 0, 0, 0.19);
+  --mac-control-glass-on-idle: linear-gradient(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.05)), linear-gradient(#0078F0, #0078F0);
+  --mac-control-glass-on-clicked: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(#0078F0, #0078F0);
   /* Buttons on a content area — one property per variant, state and layer */
-  --mac-on-content-bordered-idle-bg: rgba(0, 0, 0, 0.08)
-  --mac-on-content-bordered-clicked-bg: rgba(0, 0, 0, 0.16)
-  --mac-on-content-bordered-disabled-bg: rgba(0, 0, 0, 0.04)
-  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0091FF, #0091FF)
-  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-prominent-idle-bg: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0078F0, #0078F0)
-  --mac-on-content-prominent-disabled-bg: #0078F0
-  --mac-on-content-destructive-prominent-idle-bg: #FF383C
-  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#F52F32, #F52F32)
-  --mac-on-content-destructive-prominent-disabled-bg: #F52F32
+    --mac-on-content-bordered-idle-bg: rgba(0, 0, 0, 0.08);
+  --mac-on-content-bordered-clicked-bg: rgba(0, 0, 0, 0.16);
+  --mac-on-content-bordered-disabled-bg: rgba(0, 0, 0, 0.04);
+  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0091FF, #0091FF);
+  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-prominent-idle-bg: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0078F0, #0078F0);
+  --mac-on-content-prominent-disabled-bg: #0078F0;
+  --mac-on-content-destructive-prominent-idle-bg: #FF383C;
+  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#F52F32, #F52F32);
+  --mac-on-content-destructive-prominent-disabled-bg: #F52F32;
   /* Buttons over glass — the kit carries three of the five variants there */
-  --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12))
-  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.13), rgba(0, 0, 0, 0.13)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12))
-  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.025), rgba(0, 0, 0, 0.025)), linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06))
-  --mac-on-glass-prominent-idle-bg: #0078F0
-  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0)
-  --mac-on-glass-prominent-disabled-bg: #0078F0
-  --mac-on-glass-destructive-prominent-idle-bg: #FF4747
-  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#F52F32, #F52F32)
-  --mac-on-glass-destructive-prominent-disabled-bg: #F52F32
+    --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12));
+  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.13), rgba(0, 0, 0, 0.13)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12));
+  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.025), rgba(0, 0, 0, 0.025)), linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06));
+  --mac-on-glass-prominent-idle-bg: #0078F0;
+  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0);
+  --mac-on-glass-prominent-disabled-bg: #0078F0;
+  --mac-on-glass-destructive-prominent-idle-bg: #FF4747;
+  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#F52F32, #F52F32);
+  --mac-on-glass-destructive-prominent-disabled-bg: #F52F32;
   /* Text fields — well, hairline, focus */
-  --mac-input-bg-idle: #FFFFFF
-  --mac-input-border-idle: rgba(0, 0, 0, 0.05)
-  --mac-input-bg-disabled: rgba(255, 255, 255, 0.5)
-  --mac-input-border-disabled: rgba(0, 0, 0, 0.04)
+    --mac-input-bg-idle: #FFFFFF;
+  --mac-input-border-idle: rgba(0, 0, 0, 0.05);
+  --mac-input-bg-disabled: rgba(255, 255, 255, 0.5);
+  --mac-input-border-disabled: rgba(0, 0, 0, 0.04);
   /* Tracks — progress bars and slider grooves */
-  --mac-track-filled-idle: #0088FF
+    --mac-track-filled-idle: #0088FF;
   /* Tracks, over glass */
-  --mac-track-glass-filled-idle: #0078F0
-  --mac-track-glass-unfilled-idle: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.2))
-  --mac-track-glass-tick-mark: rgba(0, 0, 0, 0.25)
-  --mac-track-glass-tick-mark-center: rgba(0, 0, 0, 0.85)
-  --mac-track-glass-tick-mark-disabled: rgba(0, 0, 0, 0.1)
-  --mac-track-glass-filled-idle-color: #0078F0
-  --mac-track-glass-unfilled-idle-color: rgba(0, 0, 0, 0.2)
+    --mac-track-glass-filled-idle: #0078F0;
+  --mac-track-glass-unfilled-idle: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.2));
+  --mac-track-glass-tick-mark: rgba(0, 0, 0, 0.25);
+  --mac-track-glass-tick-mark-center: rgba(0, 0, 0, 0.85);
+  --mac-track-glass-tick-mark-disabled: rgba(0, 0, 0, 0.1);
+  --mac-track-glass-filled-idle-color: #0078F0;
+  --mac-track-glass-unfilled-idle-color: rgba(0, 0, 0, 0.2);
   /* Knobs — the switch knob and the slider knob */
-  --mac-knob-bg-idle: #FFFFFF
-  --mac-knob-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65))
-  --mac-knob-shadow-idle: 0px 3px 36px 0px rgba(0, 0, 0, 0.05)
-  --mac-knob-glow-clicked: inset 0 0 0 1px #D9D9D9, inset 0 0 0 1.5px rgba(255, 255, 255, 0.45)
-  --mac-knob-shadow-clicked: 0 0 0 0 1px #000000
-  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0)
-  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0)
-  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0)
+    --mac-knob-bg-idle: #FFFFFF;
+  --mac-knob-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65));
+  --mac-knob-shadow-idle: 0px 3px 36px 0px rgba(0, 0, 0, 0.05);
+  --mac-knob-glow-clicked: inset 0 0 0 1px #D9D9D9, inset 0 0 0 1.5px rgba(255, 255, 255, 0.45);
+  --mac-knob-shadow-clicked: 0 0 0 0 1px #000000;
+  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0);
+  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0);
+  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0);
   /* Focus ring — the package-wide recipe (global.focusRing) */
-  --mac-focus-ring-outer: rgba(0, 136, 255, 0.25)
-  --mac-focus-ring-inner: rgba(0, 136, 255, 0.15)
-  --mac-focus-ring-width-outer: 3.5px
-  --mac-focus-ring-width-inner: 1px
-  --mac-glass-menus-bg: rgba(230, 230, 230, 0.55)
-  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.15), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.2), 0px 4px 24px 0px rgba(0, 0, 0, 0.3)
-  --mac-blur-menu: 20px
+    --mac-focus-ring-outer: rgba(0, 136, 255, 0.25);
+  --mac-focus-ring-inner: rgba(0, 136, 255, 0.15);
+  --mac-focus-ring-width-outer: 3.5px;
+  --mac-focus-ring-width-inner: 1px;
+  --mac-glass-menus-bg: rgba(230, 230, 230, 0.55);
+  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.15), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.2), 0px 4px 24px 0px rgba(0, 0, 0, 0.3);
+  --mac-blur-menu: 20px;
   /* Control metrics — heights, type and padding per size class */
-  --mac-control-height-mini: 16px
-  --mac-control-height-small: 20px
-  --mac-control-height-regular: 24px
-  --mac-control-height-large: 28px
-  --mac-control-height-xlarge: 36px
-  --mac-control-font-mini: 10px
-  --mac-control-font-small: 11px
-  --mac-control-font-regular: 13px
-  --mac-control-font-large: 13px
-  --mac-control-font-xlarge: 13px
-  --mac-control-line-mini: 13px
-  --mac-control-line-small: 14px
-  --mac-control-line-regular: 16px
-  --mac-control-line-large: 16px
-  --mac-control-line-xlarge: 16px
-  --mac-control-pad-x-mini: 7px
-  --mac-control-pad-x-small: 10px
-  --mac-control-pad-x-regular: 16px
-  --mac-control-pad-x-large: 16px
-  --mac-control-pad-x-xlarge: 16px
-  --mac-control-height: var(--mac-control-height-regular)
-  --mac-control-font: var(--mac-control-font-regular)
-  --mac-control-line: var(--mac-control-line-regular)
-  --mac-control-pad-x: var(--mac-control-pad-x-regular)
-  --mac-radius-control-small: 5px
-  --mac-radius-control-regular: 6px
-  --mac-radius-button-mini: 4px
-  --mac-radius-button-small: 5px
-  --mac-radius-button-regular: 6px
-  --mac-radius-button-large: var(--mac-radius-pill)
-  --mac-radius-button-xlarge: var(--mac-radius-pill)
-  --mac-radius-menu: 8px
-  --mac-radius-group-box: 12px
-  --mac-radius-pill: 9999px
-  --mac-switch-w-mini: 36px
-  --mac-switch-w-small: 44px
-  --mac-switch-w-regular: 54px
-  --mac-switch-w-large: 64px
-  --mac-switch-w-xlarge: 80px
-  --mac-switch-h-mini: 16px
-  --mac-switch-h-small: 20px
-  --mac-switch-h-regular: 24px
-  --mac-switch-h-large: 28px
-  --mac-switch-h-xlarge: 36px
-  --mac-switch-knob-w-mini: 21px
-  --mac-switch-knob-w-small: 26px
-  --mac-switch-knob-w-regular: 32px
-  --mac-switch-knob-w-large: 38px
-  --mac-switch-knob-w-xlarge: 47px
-  --mac-switch-knob-h-mini: 13px
-  --mac-switch-knob-h-small: 16px
-  --mac-switch-knob-h-regular: 20px
-  --mac-switch-knob-h-large: 24px
-  --mac-switch-knob-h-xlarge: 30px
-  --mac-switch-knob-inset-mini: 1.5px
-  --mac-switch-knob-inset-small: 2px
-  --mac-switch-knob-inset-regular: 2px
-  --mac-switch-knob-inset-large: 2px
-  --mac-switch-knob-inset-xlarge: 3px
-  --mac-switch-knob-travel-mini: 12px
-  --mac-switch-knob-travel-small: 14px
-  --mac-switch-knob-travel-regular: 18px
-  --mac-switch-knob-travel-large: 22px
-  --mac-switch-knob-travel-xlarge: 27px
+    --mac-control-height-mini: 16px;
+  --mac-control-height-small: 20px;
+  --mac-control-height-regular: 24px;
+  --mac-control-height-large: 28px;
+  --mac-control-height-xlarge: 36px;
+  --mac-control-font-mini: 10px;
+  --mac-control-font-small: 11px;
+  --mac-control-font-regular: 13px;
+  --mac-control-font-large: 13px;
+  --mac-control-font-xlarge: 13px;
+  --mac-control-line-mini: 13px;
+  --mac-control-line-small: 14px;
+  --mac-control-line-regular: 16px;
+  --mac-control-line-large: 16px;
+  --mac-control-line-xlarge: 16px;
+  --mac-control-pad-x-mini: 7px;
+  --mac-control-pad-x-small: 10px;
+  --mac-control-pad-x-regular: 16px;
+  --mac-control-pad-x-large: 16px;
+  --mac-control-pad-x-xlarge: 16px;
+  --mac-control-height: var(--mac-control-height-regular);
+  --mac-control-font: var(--mac-control-font-regular);
+  --mac-control-line: var(--mac-control-line-regular);
+  --mac-control-pad-x: var(--mac-control-pad-x-regular);
+  --mac-radius-control-small: 5px;
+  --mac-radius-control-regular: 6px;
+  --mac-radius-button-mini: 4px;
+  --mac-radius-button-small: 5px;
+  --mac-radius-button-regular: 6px;
+  --mac-radius-button-large: var(--mac-radius-pill);
+  --mac-radius-button-xlarge: var(--mac-radius-pill);
+  --mac-radius-menu: 8px;
+  --mac-radius-group-box: 12px;
+  --mac-radius-pill: 9999px;
+  --mac-switch-w-mini: 36px;
+  --mac-switch-w-small: 44px;
+  --mac-switch-w-regular: 54px;
+  --mac-switch-w-large: 64px;
+  --mac-switch-w-xlarge: 80px;
+  --mac-switch-h-mini: 16px;
+  --mac-switch-h-small: 20px;
+  --mac-switch-h-regular: 24px;
+  --mac-switch-h-large: 28px;
+  --mac-switch-h-xlarge: 36px;
+  --mac-switch-knob-w-mini: 21px;
+  --mac-switch-knob-w-small: 26px;
+  --mac-switch-knob-w-regular: 32px;
+  --mac-switch-knob-w-large: 38px;
+  --mac-switch-knob-w-xlarge: 47px;
+  --mac-switch-knob-h-mini: 13px;
+  --mac-switch-knob-h-small: 16px;
+  --mac-switch-knob-h-regular: 20px;
+  --mac-switch-knob-h-large: 24px;
+  --mac-switch-knob-h-xlarge: 30px;
+  --mac-switch-knob-inset-mini: 1.5px;
+  --mac-switch-knob-inset-small: 2px;
+  --mac-switch-knob-inset-regular: 2px;
+  --mac-switch-knob-inset-large: 2px;
+  --mac-switch-knob-inset-xlarge: 3px;
+  --mac-switch-knob-travel-mini: 12px;
+  --mac-switch-knob-travel-small: 14px;
+  --mac-switch-knob-travel-regular: 18px;
+  --mac-switch-knob-travel-large: 22px;
+  --mac-switch-knob-travel-xlarge: 27px;
   /* Progress indicators */
-  --mac-progress-bar-small: 6px
-  --mac-progress-bar-regular: 10px
-  --mac-progress-floor-regular: 10px
-  --mac-progress-floor-small: 8px
-  --mac-duration-fast: 130ms
-  --mac-duration-base: 200ms
-  --mac-duration-slow: 300ms
-  --mac-ease-standard: cubic-bezier(0.32, 0.72, 0, 1)
+    --mac-progress-bar-small: 6px;
+  --mac-progress-bar-regular: 10px;
+  --mac-progress-floor-regular: 10px;
+  --mac-progress-floor-small: 8px;
+  --mac-duration-fast: 130ms;
+  --mac-duration-base: 200ms;
+  --mac-duration-slow: 300ms;
+  --mac-ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
   /* Tier 2 — accent families, raw per theme */
-  --mac-system-red-light: #FF383C
-  --mac-system-red-dark: #FF4245
-  --mac-system-orange-light: #FF8D28
-  --mac-system-orange-dark: #FF9230
-  --mac-system-yellow-light: #FFCC00
-  --mac-system-yellow-dark: #FFD600
-  --mac-system-green-light: #34C759
-  --mac-system-green-dark: #30D158
-  --mac-system-blue-light: #0088FF
-  --mac-system-blue-dark: #0091FF
+    --mac-system-red-light: #FF383C;
+  --mac-system-red-dark: #FF4245;
+  --mac-system-orange-light: #FF8D28;
+  --mac-system-orange-dark: #FF9230;
+  --mac-system-yellow-light: #FFCC00;
+  --mac-system-yellow-dark: #FFD600;
+  --mac-system-green-light: #34C759;
+  --mac-system-green-dark: #30D158;
+  --mac-system-blue-light: #0088FF;
+  --mac-system-blue-dark: #0091FF;
 }
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme="light"]) {
     /* Labels — the alpha ladder (never a set of greys) */
-  --mac-label-primary: #FFFFFF
-    --mac-label-secondary: rgba(255, 255, 255, 0.55)
-    --mac-label-tertiary: rgba(255, 255, 255, 0.25)
-    --mac-label-quaternary: rgba(255, 255, 255, 0.1)
+      --mac-label-primary: #FFFFFF;
+    --mac-label-secondary: rgba(255, 255, 255, 0.55);
+    --mac-label-tertiary: rgba(255, 255, 255, 0.25);
+    --mac-label-quaternary: rgba(255, 255, 255, 0.1);
     /* Surface fills — the fill ramp (not the label Fills) */
-  --mac-fill-primary: rgba(255, 255, 255, 0.1)
-    --mac-fill-secondary: rgba(255, 255, 255, 0.08)
-    --mac-fill-tertiary: rgba(255, 255, 255, 0.05)
-    --mac-fill-quaternary: rgba(255, 255, 255, 0.03)
-    --mac-fill-quinary: rgba(255, 255, 255, 0.02)
+      --mac-fill-primary: rgba(255, 255, 255, 0.1);
+    --mac-fill-secondary: rgba(255, 255, 255, 0.08);
+    --mac-fill-tertiary: rgba(255, 255, 255, 0.05);
+    --mac-fill-quaternary: rgba(255, 255, 255, 0.03);
+    --mac-fill-quinary: rgba(255, 255, 255, 0.02);
     /* Surfaces, lines and borders */
-  --mac-window-bg: #1E1E1E
-    --mac-separator: rgba(255, 255, 255, 0.29)
+      --mac-window-bg: #1E1E1E;
+    --mac-separator: rgba(255, 255, 255, 0.29);
     /* Accent families — twelve families, accent is blue */
-  --mac-accent: #0091FF
-    --mac-destructive: #FF4245
+      --mac-accent: #0091FF;
+    --mac-destructive: #FF4245;
     /* Control fills, content area — Active|Inactive x On|Off x Idle|Clicked|Disabled */
-  --mac-control-off-idle: rgba(255, 255, 255, 0.1)
-    --mac-control-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF)
+      --mac-control-off-idle: rgba(255, 255, 255, 0.1);
+    --mac-control-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF);
     /* Control fills, over glass — the other appearance set (never blended) */
-  --mac-control-glass-off-idle: rgba(255, 255, 255, 0.14)
-    --mac-control-glass-off-clicked: rgba(255, 255, 255, 0.19)
-    --mac-control-glass-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF)
-    --mac-control-glass-on-clicked: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)), linear-gradient(#0091FF, #0091FF)
+      --mac-control-glass-off-idle: rgba(255, 255, 255, 0.14);
+    --mac-control-glass-off-clicked: rgba(255, 255, 255, 0.19);
+    --mac-control-glass-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF);
+    --mac-control-glass-on-clicked: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)), linear-gradient(#0091FF, #0091FF);
     /* Buttons on a content area — one property per variant, state and layer */
-  --mac-on-content-bordered-idle-bg: rgba(255, 255, 255, 0.07)
-    --mac-on-content-bordered-clicked-bg: rgba(255, 255, 255, 0.16)
-    --mac-on-content-bordered-disabled-bg: rgba(255, 255, 255, 0.04)
-    --mac-on-content-tinted-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-    --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-    --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-    --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-    --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-    --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-    --mac-on-content-prominent-idle-bg: #0091FF
-    --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#0A99FF, #0A99FF)
-    --mac-on-content-prominent-disabled-bg: #0A99FF
-    --mac-on-content-destructive-prominent-idle-bg: #FF4245
-    --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#FF4747, #FF4747)
-    --mac-on-content-destructive-prominent-disabled-bg: #FF4747
+      --mac-on-content-bordered-idle-bg: rgba(255, 255, 255, 0.07);
+    --mac-on-content-bordered-clicked-bg: rgba(255, 255, 255, 0.16);
+    --mac-on-content-bordered-disabled-bg: rgba(255, 255, 255, 0.04);
+    --mac-on-content-tinted-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+    --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+    --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+    --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+    --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+    --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+    --mac-on-content-prominent-idle-bg: #0091FF;
+    --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#0A99FF, #0A99FF);
+    --mac-on-content-prominent-disabled-bg: #0A99FF;
+    --mac-on-content-destructive-prominent-idle-bg: #FF4245;
+    --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#FF4747, #FF4747);
+    --mac-on-content-destructive-prominent-disabled-bg: #FF4747;
     /* Buttons over glass — the kit carries three of the five variants there */
-  --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12))
-    --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.13)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12))
-    --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)), linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06))
-    --mac-on-glass-prominent-idle-bg: #0A99FF
-    --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0078F0, #0078F0)
-    --mac-on-glass-prominent-disabled-bg: #0A99FF
-    --mac-on-glass-destructive-prominent-idle-bg: #F52F32
-    --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.15)), linear-gradient(#FF4747, #FF4747)
-    --mac-on-glass-destructive-prominent-disabled-bg: #FF4747
+      --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12));
+    --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.13)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12));
+    --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)), linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06));
+    --mac-on-glass-prominent-idle-bg: #0A99FF;
+    --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0078F0, #0078F0);
+    --mac-on-glass-prominent-disabled-bg: #0A99FF;
+    --mac-on-glass-destructive-prominent-idle-bg: #F52F32;
+    --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.15)), linear-gradient(#FF4747, #FF4747);
+    --mac-on-glass-destructive-prominent-disabled-bg: #FF4747;
     /* Text fields — well, hairline, focus */
-  --mac-input-bg-idle: #1E1E1E
-    --mac-input-border-idle: rgba(255, 255, 255, 0.04)
-    --mac-input-bg-disabled: rgba(30, 30, 30, 0.5)
+      --mac-input-bg-idle: #1E1E1E;
+    --mac-input-border-idle: rgba(255, 255, 255, 0.04);
+    --mac-input-bg-disabled: rgba(30, 30, 30, 0.5);
     /* Tracks — progress bars and slider grooves */
-  --mac-track-filled-idle: #0091FF
+      --mac-track-filled-idle: #0091FF;
     /* Tracks, over glass */
-  --mac-track-glass-filled-idle: #0A99FF
-    --mac-track-glass-unfilled-idle: linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.03)), linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04))
-    --mac-track-glass-tick-mark: #404040
-    --mac-track-glass-tick-mark-center: #D9D9D9
-    --mac-track-glass-tick-mark-disabled: #1A1A1A
-    --mac-track-glass-filled-idle-color: #0A99FF
-    --mac-track-glass-unfilled-idle-color: rgba(255, 255, 255, 0.04)
+      --mac-track-glass-filled-idle: #0A99FF;
+    --mac-track-glass-unfilled-idle: linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.03)), linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04));
+    --mac-track-glass-tick-mark: #404040;
+    --mac-track-glass-tick-mark-center: #D9D9D9;
+    --mac-track-glass-tick-mark-disabled: #1A1A1A;
+    --mac-track-glass-filled-idle-color: #0A99FF;
+    --mac-track-glass-unfilled-idle-color: rgba(255, 255, 255, 0.04);
     /* Knobs — the switch knob and the slider knob */
-  --mac-knob-bg-idle: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65))
-    --mac-knob-shadow-idle: 0px 0px 1px 0px rgba(255, 255, 255, 0.1), -1.75px -2.5px 2px -1.5px #FFFFFF, 1.75px 2.5px 1px -1.5px #FFFFFF, 0px 0px 1px -0.25px rgba(0, 0, 0, 0.05), 0px 0px 4px -0.5px rgba(0, 0, 0, 0.05), 0px 0px 44px 0px rgba(0, 0, 0, 0.1)
-    --mac-knob-glow-clicked: inset 0 0 0 1px rgba(0, 0, 0, 0.2)
-    --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF)
-    --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0A99FF, #0A99FF)
-    --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF)
-    --mac-glass-menus-bg: rgba(90, 90, 90, 0.5)
-    --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.4), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.8), 0px 4px 24px 0px rgba(0, 0, 0, 0.3)
+      --mac-knob-bg-idle: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65));
+    --mac-knob-shadow-idle: 0px 0px 1px 0px rgba(255, 255, 255, 0.1), -1.75px -2.5px 2px -1.5px #FFFFFF, 1.75px 2.5px 1px -1.5px #FFFFFF, 0px 0px 1px -0.25px rgba(0, 0, 0, 0.05), 0px 0px 4px -0.5px rgba(0, 0, 0, 0.05), 0px 0px 44px 0px rgba(0, 0, 0, 0.1);
+    --mac-knob-glow-clicked: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+    --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF);
+    --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0A99FF, #0A99FF);
+    --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF);
+    --mac-glass-menus-bg: rgba(90, 90, 90, 0.5);
+    --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.4), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.8), 0px 4px 24px 0px rgba(0, 0, 0, 0.3);
   }
 }
 
 html[data-theme="dark"],
 [data-theme="dark"] {
   /* Labels — the alpha ladder (never a set of greys) */
-  --mac-label-primary: #FFFFFF
-  --mac-label-secondary: rgba(255, 255, 255, 0.55)
-  --mac-label-tertiary: rgba(255, 255, 255, 0.25)
-  --mac-label-quaternary: rgba(255, 255, 255, 0.1)
+    --mac-label-primary: #FFFFFF;
+  --mac-label-secondary: rgba(255, 255, 255, 0.55);
+  --mac-label-tertiary: rgba(255, 255, 255, 0.25);
+  --mac-label-quaternary: rgba(255, 255, 255, 0.1);
   /* Surface fills — the fill ramp (not the label Fills) */
-  --mac-fill-primary: rgba(255, 255, 255, 0.1)
-  --mac-fill-secondary: rgba(255, 255, 255, 0.08)
-  --mac-fill-tertiary: rgba(255, 255, 255, 0.05)
-  --mac-fill-quaternary: rgba(255, 255, 255, 0.03)
-  --mac-fill-quinary: rgba(255, 255, 255, 0.02)
+    --mac-fill-primary: rgba(255, 255, 255, 0.1);
+  --mac-fill-secondary: rgba(255, 255, 255, 0.08);
+  --mac-fill-tertiary: rgba(255, 255, 255, 0.05);
+  --mac-fill-quaternary: rgba(255, 255, 255, 0.03);
+  --mac-fill-quinary: rgba(255, 255, 255, 0.02);
   /* Surfaces, lines and borders */
-  --mac-window-bg: #1E1E1E
-  --mac-separator: rgba(255, 255, 255, 0.29)
+    --mac-window-bg: #1E1E1E;
+  --mac-separator: rgba(255, 255, 255, 0.29);
   /* Accent families — twelve families, accent is blue */
-  --mac-accent: #0091FF
-  --mac-destructive: #FF4245
+    --mac-accent: #0091FF;
+  --mac-destructive: #FF4245;
   /* Control fills, content area — Active|Inactive x On|Off x Idle|Clicked|Disabled */
-  --mac-control-off-idle: rgba(255, 255, 255, 0.1)
-  --mac-control-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF)
+    --mac-control-off-idle: rgba(255, 255, 255, 0.1);
+  --mac-control-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF);
   /* Control fills, over glass — the other appearance set (never blended) */
-  --mac-control-glass-off-idle: rgba(255, 255, 255, 0.14)
-  --mac-control-glass-off-clicked: rgba(255, 255, 255, 0.19)
-  --mac-control-glass-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF)
-  --mac-control-glass-on-clicked: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)), linear-gradient(#0091FF, #0091FF)
+    --mac-control-glass-off-idle: rgba(255, 255, 255, 0.14);
+  --mac-control-glass-off-clicked: rgba(255, 255, 255, 0.19);
+  --mac-control-glass-on-idle: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(#0091FF, #0091FF);
+  --mac-control-glass-on-clicked: linear-gradient(rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.08)), linear-gradient(#0091FF, #0091FF);
   /* Buttons on a content area — one property per variant, state and layer */
-  --mac-on-content-bordered-idle-bg: rgba(255, 255, 255, 0.07)
-  --mac-on-content-bordered-clicked-bg: rgba(255, 255, 255, 0.16)
-  --mac-on-content-bordered-disabled-bg: rgba(255, 255, 255, 0.04)
-  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF)
-  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245)
-  --mac-on-content-prominent-idle-bg: #0091FF
-  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#0A99FF, #0A99FF)
-  --mac-on-content-prominent-disabled-bg: #0A99FF
-  --mac-on-content-destructive-prominent-idle-bg: #FF4245
-  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#FF4747, #FF4747)
-  --mac-on-content-destructive-prominent-disabled-bg: #FF4747
+    --mac-on-content-bordered-idle-bg: rgba(255, 255, 255, 0.07);
+  --mac-on-content-bordered-clicked-bg: rgba(255, 255, 255, 0.16);
+  --mac-on-content-bordered-disabled-bg: rgba(255, 255, 255, 0.04);
+  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0091FF, #0091FF);
+  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#FF4245, #FF4245);
+  --mac-on-content-prominent-idle-bg: #0091FF;
+  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#0A99FF, #0A99FF);
+  --mac-on-content-prominent-disabled-bg: #0A99FF;
+  --mac-on-content-destructive-prominent-idle-bg: #FF4245;
+  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.1), rgba(255, 255, 255, 0.1)), linear-gradient(#FF4747, #FF4747);
+  --mac-on-content-destructive-prominent-disabled-bg: #FF4747;
   /* Buttons over glass — the kit carries three of the five variants there */
-  --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12))
-  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.13)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12))
-  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)), linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06))
-  --mac-on-glass-prominent-idle-bg: #0A99FF
-  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0078F0, #0078F0)
-  --mac-on-glass-prominent-disabled-bg: #0A99FF
-  --mac-on-glass-destructive-prominent-idle-bg: #F52F32
-  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.15)), linear-gradient(#FF4747, #FF4747)
-  --mac-on-glass-destructive-prominent-disabled-bg: #FF4747
+    --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(255, 255, 255, 0.05), rgba(255, 255, 255, 0.05)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12));
+  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.13), rgba(255, 255, 255, 0.13)), linear-gradient(rgba(255, 255, 255, 0.12), rgba(255, 255, 255, 0.12));
+  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(255, 255, 255, 0.025), rgba(255, 255, 255, 0.025)), linear-gradient(rgba(255, 255, 255, 0.06), rgba(255, 255, 255, 0.06));
+  --mac-on-glass-prominent-idle-bg: #0A99FF;
+  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0078F0, #0078F0);
+  --mac-on-glass-prominent-disabled-bg: #0A99FF;
+  --mac-on-glass-destructive-prominent-idle-bg: #F52F32;
+  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(255, 255, 255, 0.15), rgba(255, 255, 255, 0.15)), linear-gradient(#FF4747, #FF4747);
+  --mac-on-glass-destructive-prominent-disabled-bg: #FF4747;
   /* Text fields — well, hairline, focus */
-  --mac-input-bg-idle: #1E1E1E
-  --mac-input-border-idle: rgba(255, 255, 255, 0.04)
-  --mac-input-bg-disabled: rgba(30, 30, 30, 0.5)
+    --mac-input-bg-idle: #1E1E1E;
+  --mac-input-border-idle: rgba(255, 255, 255, 0.04);
+  --mac-input-bg-disabled: rgba(30, 30, 30, 0.5);
   /* Tracks — progress bars and slider grooves */
-  --mac-track-filled-idle: #0091FF
+    --mac-track-filled-idle: #0091FF;
   /* Tracks, over glass */
-  --mac-track-glass-filled-idle: #0A99FF
-  --mac-track-glass-unfilled-idle: linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.03)), linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04))
-  --mac-track-glass-tick-mark: #404040
-  --mac-track-glass-tick-mark-center: #D9D9D9
-  --mac-track-glass-tick-mark-disabled: #1A1A1A
-  --mac-track-glass-filled-idle-color: #0A99FF
-  --mac-track-glass-unfilled-idle-color: rgba(255, 255, 255, 0.04)
+    --mac-track-glass-filled-idle: #0A99FF;
+  --mac-track-glass-unfilled-idle: linear-gradient(rgba(255, 255, 255, 0.03), rgba(255, 255, 255, 0.03)), linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04));
+  --mac-track-glass-tick-mark: #404040;
+  --mac-track-glass-tick-mark-center: #D9D9D9;
+  --mac-track-glass-tick-mark-disabled: #1A1A1A;
+  --mac-track-glass-filled-idle-color: #0A99FF;
+  --mac-track-glass-unfilled-idle-color: rgba(255, 255, 255, 0.04);
   /* Knobs — the switch knob and the slider knob */
-  --mac-knob-bg-idle: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65))
-  --mac-knob-shadow-idle: 0px 0px 1px 0px rgba(255, 255, 255, 0.1), -1.75px -2.5px 2px -1.5px #FFFFFF, 1.75px 2.5px 1px -1.5px #FFFFFF, 0px 0px 1px -0.25px rgba(0, 0, 0, 0.05), 0px 0px 4px -0.5px rgba(0, 0, 0, 0.05), 0px 0px 44px 0px rgba(0, 0, 0, 0.1)
-  --mac-knob-glow-clicked: inset 0 0 0 1px rgba(0, 0, 0, 0.2)
-  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF)
-  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0A99FF, #0A99FF)
-  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF)
-  --mac-glass-menus-bg: rgba(90, 90, 90, 0.5)
-  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.4), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.8), 0px 4px 24px 0px rgba(0, 0, 0, 0.3)
+    --mac-knob-bg-idle: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65));
+  --mac-knob-shadow-idle: 0px 0px 1px 0px rgba(255, 255, 255, 0.1), -1.75px -2.5px 2px -1.5px #FFFFFF, 1.75px 2.5px 1px -1.5px #FFFFFF, 0px 0px 1px -0.25px rgba(0, 0, 0, 0.05), 0px 0px 4px -0.5px rgba(0, 0, 0, 0.05), 0px 0px 44px 0px rgba(0, 0, 0, 0.1);
+  --mac-knob-glow-clicked: inset 0 0 0 1px rgba(0, 0, 0, 0.2);
+  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF);
+  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(255, 255, 255, 0.14), rgba(255, 255, 255, 0.14)), linear-gradient(#0A99FF, #0A99FF);
+  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.04), rgba(255, 255, 255, 0.04)), linear-gradient(#0A99FF, #0A99FF);
+  --mac-glass-menus-bg: rgba(90, 90, 90, 0.5);
+  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.4), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.8), 0px 4px 24px 0px rgba(0, 0, 0, 0.3);
 }
 
 [data-theme="light"] {
   /* Type — the kit's stack and the five weights */
-  --mac-font-sans: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif
-  --mac-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace
-  --mac-weight-medium: 500
-  --mac-weight-bold: 700
+    --mac-font-sans: "SF Pro Text", "SF Pro Display", -apple-system, BlinkMacSystemFont, "Helvetica Neue", "Segoe UI Variable", "Segoe UI", system-ui, sans-serif;
+  --mac-font-mono: ui-monospace, SFMono-Regular, "SF Mono", Menlo, Consolas, "Liberation Mono", monospace;
+  --mac-weight-medium: 500;
+  --mac-weight-bold: 700;
   /* Type — the eleven styles (leading variants are compositional: calc(line ± 2px)) */
-  --mac-text-large-title-size: 26px
-  --mac-text-large-title-line: 32px
-  --mac-text-large-title-weight: 400
-  --mac-text-large-title-weight-em: 700
-  --mac-text-title1-size: 22px
-  --mac-text-title1-line: 26px
-  --mac-text-title1-weight: 400
-  --mac-text-title1-weight-em: 700
-  --mac-text-title2-size: 17px
-  --mac-text-title2-line: 22px
-  --mac-text-title2-weight: 400
-  --mac-text-title2-weight-em: 700
-  --mac-text-title3-size: 15px
-  --mac-text-title3-line: 20px
-  --mac-text-title3-weight: 400
-  --mac-text-title3-weight-em: 600
-  --mac-text-headline-size: 13px
-  --mac-text-headline-line: 16px
-  --mac-text-headline-weight: 700
-  --mac-text-headline-weight-em: 800
-  --mac-text-body-size: 13px
-  --mac-text-body-line: 16px
-  --mac-text-body-weight: 400
-  --mac-text-body-weight-em: 600
-  --mac-text-callout-size: 12px
-  --mac-text-callout-line: 15px
-  --mac-text-callout-weight: 400
-  --mac-text-callout-weight-em: 600
-  --mac-text-subheadline-size: 11px
-  --mac-text-subheadline-line: 14px
-  --mac-text-subheadline-weight: 400
-  --mac-text-subheadline-weight-em: 600
-  --mac-text-footnote-size: 10px
-  --mac-text-footnote-line: 13px
-  --mac-text-footnote-weight: 400
-  --mac-text-footnote-weight-em: 600
-  --mac-text-caption1-size: 10px
-  --mac-text-caption1-line: 13px
-  --mac-text-caption1-weight: 400
-  --mac-text-caption1-weight-em: 600
-  --mac-text-caption2-size: 10px
-  --mac-text-caption2-line: 13px
-  --mac-text-caption2-weight: 400
-  --mac-text-caption2-weight-em: 600
+    --mac-text-large-title-size: 26px;
+  --mac-text-large-title-line: 32px;
+  --mac-text-large-title-weight: 400;
+  --mac-text-large-title-weight-em: 700;
+  --mac-text-title1-size: 22px;
+  --mac-text-title1-line: 26px;
+  --mac-text-title1-weight: 400;
+  --mac-text-title1-weight-em: 700;
+  --mac-text-title2-size: 17px;
+  --mac-text-title2-line: 22px;
+  --mac-text-title2-weight: 400;
+  --mac-text-title2-weight-em: 700;
+  --mac-text-title3-size: 15px;
+  --mac-text-title3-line: 20px;
+  --mac-text-title3-weight: 400;
+  --mac-text-title3-weight-em: 600;
+  --mac-text-headline-size: 13px;
+  --mac-text-headline-line: 16px;
+  --mac-text-headline-weight: 700;
+  --mac-text-headline-weight-em: 800;
+  --mac-text-body-size: 13px;
+  --mac-text-body-line: 16px;
+  --mac-text-body-weight: 400;
+  --mac-text-body-weight-em: 600;
+  --mac-text-callout-size: 12px;
+  --mac-text-callout-line: 15px;
+  --mac-text-callout-weight: 400;
+  --mac-text-callout-weight-em: 600;
+  --mac-text-subheadline-size: 11px;
+  --mac-text-subheadline-line: 14px;
+  --mac-text-subheadline-weight: 400;
+  --mac-text-subheadline-weight-em: 600;
+  --mac-text-footnote-size: 10px;
+  --mac-text-footnote-line: 13px;
+  --mac-text-footnote-weight: 400;
+  --mac-text-footnote-weight-em: 600;
+  --mac-text-caption1-size: 10px;
+  --mac-text-caption1-line: 13px;
+  --mac-text-caption1-weight: 400;
+  --mac-text-caption1-weight-em: 600;
+  --mac-text-caption2-size: 10px;
+  --mac-text-caption2-line: 13px;
+  --mac-text-caption2-weight: 400;
+  --mac-text-caption2-weight-em: 600;
   /* Labels — the alpha ladder (never a set of greys) */
-  --mac-label-primary: rgba(0, 0, 0, 0.85)
-  --mac-label-secondary: rgba(0, 0, 0, 0.5)
-  --mac-label-tertiary: rgba(0, 0, 0, 0.25)
-  --mac-label-quaternary: rgba(0, 0, 0, 0.1)
+    --mac-label-primary: rgba(0, 0, 0, 0.85);
+  --mac-label-secondary: rgba(0, 0, 0, 0.5);
+  --mac-label-tertiary: rgba(0, 0, 0, 0.25);
+  --mac-label-quaternary: rgba(0, 0, 0, 0.1);
   /* Labels on accent — the Selected column of appearance.*.Fills */
-  --mac-label-on-accent: #FFFFFF
-  --mac-label-on-accent-secondary: rgba(255, 255, 255, 0.55)
+    --mac-label-on-accent: #FFFFFF;
+  --mac-label-on-accent-secondary: rgba(255, 255, 255, 0.55);
   /* Surface fills — the fill ramp (not the label Fills) */
-  --mac-fill-primary: rgba(0, 0, 0, 0.1)
-  --mac-fill-secondary: rgba(0, 0, 0, 0.08)
-  --mac-fill-tertiary: rgba(0, 0, 0, 0.05)
-  --mac-fill-quaternary: rgba(0, 0, 0, 0.03)
-  --mac-fill-quinary: rgba(0, 0, 0, 0.02)
+    --mac-fill-primary: rgba(0, 0, 0, 0.1);
+  --mac-fill-secondary: rgba(0, 0, 0, 0.08);
+  --mac-fill-tertiary: rgba(0, 0, 0, 0.05);
+  --mac-fill-quaternary: rgba(0, 0, 0, 0.03);
+  --mac-fill-quinary: rgba(0, 0, 0, 0.02);
   /* Spacing — DERIVED, not a token (NAMING.md §9, references/04-metrics.md) */
-  --mac-space-4: 4px
-  --mac-space-6: 6px
-  --mac-space-8: 8px
-  --mac-space-10: 10px
-  --mac-space-12: 12px
-  --mac-space-16: 16px
-  --mac-space-20: 20px
-  --mac-space-24: 24px
-  --mac-space-32: 32px
+    --mac-space-4: 4px;
+  --mac-space-6: 6px;
+  --mac-space-8: 8px;
+  --mac-space-10: 10px;
+  --mac-space-12: 12px;
+  --mac-space-16: 16px;
+  --mac-space-20: 20px;
+  --mac-space-24: 24px;
+  --mac-space-32: 32px;
   /* Surfaces, lines and borders */
-  --mac-window-bg: #FFFFFF
-  --mac-separator: rgba(60, 60, 67, 0.29)
+    --mac-window-bg: #FFFFFF;
+  --mac-separator: rgba(60, 60, 67, 0.29);
   /* Accent families — twelve families, accent is blue */
-  --mac-accent: #0088FF
-  --mac-destructive: #FF383C
+    --mac-accent: #0088FF;
+  --mac-destructive: #FF383C;
   /* Control fills, content area — Active|Inactive x On|Off x Idle|Clicked|Disabled */
-  --mac-control-off-idle: rgba(0, 0, 0, 0.1)
-  --mac-control-on-idle: #0088FF
+    --mac-control-off-idle: rgba(0, 0, 0, 0.1);
+  --mac-control-on-idle: #0088FF;
   /* Control fills, over glass — the other appearance set (never blended) */
-  --mac-control-glass-off-idle: rgba(0, 0, 0, 0.15)
-  --mac-control-glass-off-clicked: rgba(0, 0, 0, 0.19)
-  --mac-control-glass-on-idle: linear-gradient(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.05)), linear-gradient(#0078F0, #0078F0)
-  --mac-control-glass-on-clicked: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(#0078F0, #0078F0)
+    --mac-control-glass-off-idle: rgba(0, 0, 0, 0.15);
+  --mac-control-glass-off-clicked: rgba(0, 0, 0, 0.19);
+  --mac-control-glass-on-idle: linear-gradient(rgba(0, 0, 0, 0.05), rgba(0, 0, 0, 0.05)), linear-gradient(#0078F0, #0078F0);
+  --mac-control-glass-on-clicked: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(#0078F0, #0078F0);
   /* Buttons on a content area — one property per variant, state and layer */
-  --mac-on-content-bordered-idle-bg: rgba(0, 0, 0, 0.08)
-  --mac-on-content-bordered-clicked-bg: rgba(0, 0, 0, 0.16)
-  --mac-on-content-bordered-disabled-bg: rgba(0, 0, 0, 0.04)
-  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0091FF, #0091FF)
-  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C)
-  --mac-on-content-prominent-idle-bg: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0088FF, #0088FF)
-  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0078F0, #0078F0)
-  --mac-on-content-prominent-disabled-bg: #0078F0
-  --mac-on-content-destructive-prominent-idle-bg: #FF383C
-  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#F52F32, #F52F32)
-  --mac-on-content-destructive-prominent-disabled-bg: #F52F32
+    --mac-on-content-bordered-idle-bg: rgba(0, 0, 0, 0.08);
+  --mac-on-content-bordered-clicked-bg: rgba(0, 0, 0, 0.16);
+  --mac-on-content-bordered-disabled-bg: rgba(0, 0, 0, 0.04);
+  --mac-on-content-tinted-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-tinted-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0091FF, #0091FF);
+  --mac-on-content-tinted-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-destructive-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-destructive-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-destructive-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#FF383C, #FF383C);
+  --mac-on-content-prominent-idle-bg: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0088FF, #0088FF);
+  --mac-on-content-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#0078F0, #0078F0);
+  --mac-on-content-prominent-disabled-bg: #0078F0;
+  --mac-on-content-destructive-prominent-idle-bg: #FF383C;
+  --mac-on-content-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.1), rgba(0, 0, 0, 0.1)), linear-gradient(#F52F32, #F52F32);
+  --mac-on-content-destructive-prominent-disabled-bg: #F52F32;
   /* Buttons over glass — the kit carries three of the five variants there */
-  --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12))
-  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.13), rgba(0, 0, 0, 0.13)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12))
-  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.025), rgba(0, 0, 0, 0.025)), linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06))
-  --mac-on-glass-prominent-idle-bg: #0078F0
-  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0)
-  --mac-on-glass-prominent-disabled-bg: #0078F0
-  --mac-on-glass-destructive-prominent-idle-bg: #FF4747
-  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#F52F32, #F52F32)
-  --mac-on-glass-destructive-prominent-disabled-bg: #F52F32
+    --mac-on-glass-bordered-idle-bg: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12));
+  --mac-on-glass-bordered-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.13), rgba(0, 0, 0, 0.13)), linear-gradient(rgba(0, 0, 0, 0.12), rgba(0, 0, 0, 0.12));
+  --mac-on-glass-bordered-disabled-bg: linear-gradient(rgba(0, 0, 0, 0.025), rgba(0, 0, 0, 0.025)), linear-gradient(rgba(0, 0, 0, 0.06), rgba(0, 0, 0, 0.06));
+  --mac-on-glass-prominent-idle-bg: #0078F0;
+  --mac-on-glass-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0);
+  --mac-on-glass-prominent-disabled-bg: #0078F0;
+  --mac-on-glass-destructive-prominent-idle-bg: #FF4747;
+  --mac-on-glass-destructive-prominent-clicked-bg: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#F52F32, #F52F32);
+  --mac-on-glass-destructive-prominent-disabled-bg: #F52F32;
   /* Text fields — well, hairline, focus */
-  --mac-input-bg-idle: #FFFFFF
-  --mac-input-border-idle: rgba(0, 0, 0, 0.05)
-  --mac-input-bg-disabled: rgba(255, 255, 255, 0.5)
-  --mac-input-border-disabled: rgba(0, 0, 0, 0.04)
+    --mac-input-bg-idle: #FFFFFF;
+  --mac-input-border-idle: rgba(0, 0, 0, 0.05);
+  --mac-input-bg-disabled: rgba(255, 255, 255, 0.5);
+  --mac-input-border-disabled: rgba(0, 0, 0, 0.04);
   /* Tracks — progress bars and slider grooves */
-  --mac-track-filled-idle: #0088FF
+    --mac-track-filled-idle: #0088FF;
   /* Tracks, over glass */
-  --mac-track-glass-filled-idle: #0078F0
-  --mac-track-glass-unfilled-idle: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.2))
-  --mac-track-glass-tick-mark: rgba(0, 0, 0, 0.25)
-  --mac-track-glass-tick-mark-center: rgba(0, 0, 0, 0.85)
-  --mac-track-glass-tick-mark-disabled: rgba(0, 0, 0, 0.1)
-  --mac-track-glass-filled-idle-color: #0078F0
-  --mac-track-glass-unfilled-idle-color: rgba(0, 0, 0, 0.2)
+    --mac-track-glass-filled-idle: #0078F0;
+  --mac-track-glass-unfilled-idle: linear-gradient(rgba(0, 0, 0, 0.07), rgba(0, 0, 0, 0.07)), linear-gradient(rgba(0, 0, 0, 0.2), rgba(0, 0, 0, 0.2));
+  --mac-track-glass-tick-mark: rgba(0, 0, 0, 0.25);
+  --mac-track-glass-tick-mark-center: rgba(0, 0, 0, 0.85);
+  --mac-track-glass-tick-mark-disabled: rgba(0, 0, 0, 0.1);
+  --mac-track-glass-filled-idle-color: #0078F0;
+  --mac-track-glass-unfilled-idle-color: rgba(0, 0, 0, 0.2);
   /* Knobs — the switch knob and the slider knob */
-  --mac-knob-bg-idle: #FFFFFF
-  --mac-knob-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65))
-  --mac-knob-shadow-idle: 0px 3px 36px 0px rgba(0, 0, 0, 0.05)
-  --mac-knob-glow-clicked: inset 0 0 0 1px #D9D9D9, inset 0 0 0 1.5px rgba(255, 255, 255, 0.45)
-  --mac-knob-shadow-clicked: 0 0 0 0 1px #000000
-  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0)
-  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0)
-  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0)
+    --mac-knob-bg-idle: #FFFFFF;
+  --mac-knob-bg-disabled: linear-gradient(rgba(255, 255, 255, 0.35), rgba(255, 255, 255, 0.35)), linear-gradient(rgba(255, 255, 255, 0.45), rgba(255, 255, 255, 0.45)), linear-gradient(rgba(255, 255, 255, 0.65), rgba(255, 255, 255, 0.65));
+  --mac-knob-shadow-idle: 0px 3px 36px 0px rgba(0, 0, 0, 0.05);
+  --mac-knob-glow-clicked: inset 0 0 0 1px #D9D9D9, inset 0 0 0 1.5px rgba(255, 255, 255, 0.45);
+  --mac-knob-shadow-clicked: 0 0 0 0 1px #000000;
+  --mac-segmented-glass-on-bg-idle: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0);
+  --mac-segmented-glass-on-bg-clicked: linear-gradient(rgba(0, 0, 0, 0.15), rgba(0, 0, 0, 0.15)), linear-gradient(#0078F0, #0078F0);
+  --mac-segmented-glass-on-bg-disabled: linear-gradient(rgba(0, 0, 0, 0.03), rgba(0, 0, 0, 0.03)), linear-gradient(#0078F0, #0078F0);
   /* Focus ring — the package-wide recipe (global.focusRing) */
-  --mac-focus-ring-outer: rgba(0, 136, 255, 0.25)
-  --mac-focus-ring-inner: rgba(0, 136, 255, 0.15)
-  --mac-focus-ring-width-outer: 3.5px
-  --mac-focus-ring-width-inner: 1px
-  --mac-glass-menus-bg: rgba(230, 230, 230, 0.55)
-  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.15), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.2), 0px 4px 24px 0px rgba(0, 0, 0, 0.3)
-  --mac-blur-menu: 20px
+    --mac-focus-ring-outer: rgba(0, 136, 255, 0.25);
+  --mac-focus-ring-inner: rgba(0, 136, 255, 0.15);
+  --mac-focus-ring-width-outer: 3.5px;
+  --mac-focus-ring-width-inner: 1px;
+  --mac-glass-menus-bg: rgba(230, 230, 230, 0.55);
+  --mac-glass-menus-shadow: 0px 0px 0px 1px rgba(102, 102, 102, 0.15), 0px 0.5px 0px 0px #262626, 0px -0.5px 0px 0px #262626, 0px 4px 8px -4px #0D0D0D, 0px -4px 8px -4px #0D0D0D, 0px 0px 0px 0.5px rgba(0, 0, 0, 0.2), 0px 4px 24px 0px rgba(0, 0, 0, 0.3);
+  --mac-blur-menu: 20px;
   /* Control metrics — heights, type and padding per size class */
-  --mac-control-height-mini: 16px
-  --mac-control-height-small: 20px
-  --mac-control-height-regular: 24px
-  --mac-control-height-large: 28px
-  --mac-control-height-xlarge: 36px
-  --mac-control-font-mini: 10px
-  --mac-control-font-small: 11px
-  --mac-control-font-regular: 13px
-  --mac-control-font-large: 13px
-  --mac-control-font-xlarge: 13px
-  --mac-control-line-mini: 13px
-  --mac-control-line-small: 14px
-  --mac-control-line-regular: 16px
-  --mac-control-line-large: 16px
-  --mac-control-line-xlarge: 16px
-  --mac-control-pad-x-mini: 7px
-  --mac-control-pad-x-small: 10px
-  --mac-control-pad-x-regular: 16px
-  --mac-control-pad-x-large: 16px
-  --mac-control-pad-x-xlarge: 16px
-  --mac-control-height: var(--mac-control-height-regular)
-  --mac-control-font: var(--mac-control-font-regular)
-  --mac-control-line: var(--mac-control-line-regular)
-  --mac-control-pad-x: var(--mac-control-pad-x-regular)
-  --mac-radius-control-small: 5px
-  --mac-radius-control-regular: 6px
-  --mac-radius-button-mini: 4px
-  --mac-radius-button-small: 5px
-  --mac-radius-button-regular: 6px
-  --mac-radius-button-large: var(--mac-radius-pill)
-  --mac-radius-button-xlarge: var(--mac-radius-pill)
-  --mac-radius-menu: 8px
-  --mac-radius-group-box: 12px
-  --mac-radius-pill: 9999px
-  --mac-switch-w-mini: 36px
-  --mac-switch-w-small: 44px
-  --mac-switch-w-regular: 54px
-  --mac-switch-w-large: 64px
-  --mac-switch-w-xlarge: 80px
-  --mac-switch-h-mini: 16px
-  --mac-switch-h-small: 20px
-  --mac-switch-h-regular: 24px
-  --mac-switch-h-large: 28px
-  --mac-switch-h-xlarge: 36px
-  --mac-switch-knob-w-mini: 21px
-  --mac-switch-knob-w-small: 26px
-  --mac-switch-knob-w-regular: 32px
-  --mac-switch-knob-w-large: 38px
-  --mac-switch-knob-w-xlarge: 47px
-  --mac-switch-knob-h-mini: 13px
-  --mac-switch-knob-h-small: 16px
-  --mac-switch-knob-h-regular: 20px
-  --mac-switch-knob-h-large: 24px
-  --mac-switch-knob-h-xlarge: 30px
-  --mac-switch-knob-inset-mini: 1.5px
-  --mac-switch-knob-inset-small: 2px
-  --mac-switch-knob-inset-regular: 2px
-  --mac-switch-knob-inset-large: 2px
-  --mac-switch-knob-inset-xlarge: 3px
-  --mac-switch-knob-travel-mini: 12px
-  --mac-switch-knob-travel-small: 14px
-  --mac-switch-knob-travel-regular: 18px
-  --mac-switch-knob-travel-large: 22px
-  --mac-switch-knob-travel-xlarge: 27px
+    --mac-control-height-mini: 16px;
+  --mac-control-height-small: 20px;
+  --mac-control-height-regular: 24px;
+  --mac-control-height-large: 28px;
+  --mac-control-height-xlarge: 36px;
+  --mac-control-font-mini: 10px;
+  --mac-control-font-small: 11px;
+  --mac-control-font-regular: 13px;
+  --mac-control-font-large: 13px;
+  --mac-control-font-xlarge: 13px;
+  --mac-control-line-mini: 13px;
+  --mac-control-line-small: 14px;
+  --mac-control-line-regular: 16px;
+  --mac-control-line-large: 16px;
+  --mac-control-line-xlarge: 16px;
+  --mac-control-pad-x-mini: 7px;
+  --mac-control-pad-x-small: 10px;
+  --mac-control-pad-x-regular: 16px;
+  --mac-control-pad-x-large: 16px;
+  --mac-control-pad-x-xlarge: 16px;
+  --mac-control-height: var(--mac-control-height-regular);
+  --mac-control-font: var(--mac-control-font-regular);
+  --mac-control-line: var(--mac-control-line-regular);
+  --mac-control-pad-x: var(--mac-control-pad-x-regular);
+  --mac-radius-control-small: 5px;
+  --mac-radius-control-regular: 6px;
+  --mac-radius-button-mini: 4px;
+  --mac-radius-button-small: 5px;
+  --mac-radius-button-regular: 6px;
+  --mac-radius-button-large: var(--mac-radius-pill);
+  --mac-radius-button-xlarge: var(--mac-radius-pill);
+  --mac-radius-menu: 8px;
+  --mac-radius-group-box: 12px;
+  --mac-radius-pill: 9999px;
+  --mac-switch-w-mini: 36px;
+  --mac-switch-w-small: 44px;
+  --mac-switch-w-regular: 54px;
+  --mac-switch-w-large: 64px;
+  --mac-switch-w-xlarge: 80px;
+  --mac-switch-h-mini: 16px;
+  --mac-switch-h-small: 20px;
+  --mac-switch-h-regular: 24px;
+  --mac-switch-h-large: 28px;
+  --mac-switch-h-xlarge: 36px;
+  --mac-switch-knob-w-mini: 21px;
+  --mac-switch-knob-w-small: 26px;
+  --mac-switch-knob-w-regular: 32px;
+  --mac-switch-knob-w-large: 38px;
+  --mac-switch-knob-w-xlarge: 47px;
+  --mac-switch-knob-h-mini: 13px;
+  --mac-switch-knob-h-small: 16px;
+  --mac-switch-knob-h-regular: 20px;
+  --mac-switch-knob-h-large: 24px;
+  --mac-switch-knob-h-xlarge: 30px;
+  --mac-switch-knob-inset-mini: 1.5px;
+  --mac-switch-knob-inset-small: 2px;
+  --mac-switch-knob-inset-regular: 2px;
+  --mac-switch-knob-inset-large: 2px;
+  --mac-switch-knob-inset-xlarge: 3px;
+  --mac-switch-knob-travel-mini: 12px;
+  --mac-switch-knob-travel-small: 14px;
+  --mac-switch-knob-travel-regular: 18px;
+  --mac-switch-knob-travel-large: 22px;
+  --mac-switch-knob-travel-xlarge: 27px;
   /* Progress indicators */
-  --mac-progress-bar-small: 6px
-  --mac-progress-bar-regular: 10px
-  --mac-progress-floor-regular: 10px
-  --mac-progress-floor-small: 8px
-  --mac-duration-fast: 130ms
-  --mac-duration-base: 200ms
-  --mac-duration-slow: 300ms
-  --mac-ease-standard: cubic-bezier(0.32, 0.72, 0, 1)
+    --mac-progress-bar-small: 6px;
+  --mac-progress-bar-regular: 10px;
+  --mac-progress-floor-regular: 10px;
+  --mac-progress-floor-small: 8px;
+  --mac-duration-fast: 130ms;
+  --mac-duration-base: 200ms;
+  --mac-duration-slow: 300ms;
+  --mac-ease-standard: cubic-bezier(0.32, 0.72, 0, 1);
   /* Tier 2 — accent families, raw per theme */
-  --mac-system-red-light: #FF383C
-  --mac-system-red-dark: #FF4245
-  --mac-system-orange-light: #FF8D28
-  --mac-system-orange-dark: #FF9230
-  --mac-system-yellow-light: #FFCC00
-  --mac-system-yellow-dark: #FFD600
-  --mac-system-green-light: #34C759
-  --mac-system-green-dark: #30D158
-  --mac-system-blue-light: #0088FF
-  --mac-system-blue-dark: #0091FF
+    --mac-system-red-light: #FF383C;
+  --mac-system-red-dark: #FF4245;
+  --mac-system-orange-light: #FF8D28;
+  --mac-system-orange-dark: #FF9230;
+  --mac-system-yellow-light: #FFCC00;
+  --mac-system-yellow-dark: #FFD600;
+  --mac-system-green-light: #34C759;
+  --mac-system-green-dark: #30D158;
+  --mac-system-blue-light: #0088FF;
+  --mac-system-blue-dark: #0091FF;
 }
 
 :root {
   --mac-focus-ring-shadow:
-    inset 0 0 0 var(--mac-focus-ring-width-inner) var(--mac-focus-ring-inner),
-    0 0 0 var(--mac-focus-ring-width-outer) var(--mac-focus-ring-outer);
+      inset 0 0 0 var(--mac-focus-ring-width-inner) var(--mac-focus-ring-inner),
+      0 0 0 var(--mac-focus-ring-width-outer) var(--mac-focus-ring-outer);
 }
 
 @media (prefers-reduced-transparency: reduce) {
@@ -2676,6 +2793,11 @@ animation: none;
 .dab-family__head{display:flex;align-items:center;gap:var(--mac-space-8);flex-wrap:wrap}
 .dab-login{display:flex;align-items:center;gap:var(--mac-space-8);flex-wrap:wrap}
 .dab-login__bar{flex:1 1 120px;max-width:220px}
+/* 登录中间的问题：换行成一整块，问题在一行、输入与按钮在下一行。 */
+.dab-prompt{display:flex;align-items:center;gap:var(--mac-space-8);flex-wrap:wrap;padding:var(--mac-space-6) var(--mac-space-8);border-radius:var(--mac-radius-group-box);background:var(--mac-fill-quinary)}
+.dab-prompt__ask{flex:1 1 240px}
+.dab-prompt__options{display:flex;align-items:center;gap:var(--mac-space-6);flex-wrap:wrap}
+.dab-prompt__field{flex:0 1 260px}
 .dab-empty{padding:var(--mac-space-10);border-radius:var(--mac-radius-group-box);background:var(--mac-fill-tertiary);color:var(--mac-label-tertiary);font-size:12px;line-height:15px}
 .dab-link{color:light-dark(var(--mac-system-blue-light),var(--mac-system-blue-dark));text-decoration:none}
 .dab-link:hover{text-decoration:underline}
@@ -2767,6 +2889,9 @@ animation: none;
       AccountPoolSection,
       ProviderCardSummary,
       ModelsFooter,
+      // 登录中间那个问题也要能单独挂起来查：三个分支（输入 / 密钥 / 选择题）
+      // 只有在被问到时才渲染，挂在整块面板上就得为每个分支各造一个族。
+      LoginPrompt,
       // 纯函数对测试开放。这里不做摇树优化，多这几个属性对体积没有意义，
       // 但「剩余 0%」与「查不到」必须能被单独钉住——它们在面板上是两句话。
       __internal: {

@@ -35,7 +35,7 @@ for (const check of report.checks) {
 test('端到端：探针把该跑的检查都跑了', () => {
   // 探针中途抛错时报告是半截的，条数会掉下来。这个下限就是「跑全了」的凭据：
   // 四条前置 + 二十六条真机检查。
-  assert.ok(report.checks.length >= 30, `只有 ${report.checks.length} 条检查，少于预期的 30 条`)
+  assert.ok(report.checks.length >= 34, `只有 ${report.checks.length} 条检查，少于预期的 34 条`)
 })
 
 test('前端：客户端模块在 Node 里渲染得出来', () => {
@@ -51,6 +51,6 @@ for (const check of client.checks) {
 
 test('前端：该检查的分支都检查了', () => {
   // 少一条就说明渲染中途抛错了（报告是半截的，但 error 可能为 null —— 比如某个断言
-  // 之后才炸）。14 条是目前的全量。
-  assert.ok(client.checks.length >= 14, `只有 ${client.checks.length} 条前端检查，少于预期的 14 条`)
+  // 之后才炸）。21 条是目前的全量。
+  assert.ok(client.checks.length >= 21, `只有 ${client.checks.length} 条前端检查，少于预期的 21 条`)
 })

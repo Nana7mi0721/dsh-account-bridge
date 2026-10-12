@@ -316,8 +316,20 @@ export function registerAccountBridgeRoutes(options) {
         discoverable: typeof family?.discover === 'function',
         /** 本机客户端发现了但还没导入的账号数（给按钮上的角标用）。 */
         accounts,
+        /**
+         * 面板是**从这里**画登录那一块的：少了 `prompt`，族在登录中间问的问题
+         * （粘贴令牌 / 填 baseURL）就永远没人看得见——状态写着「等你回答」，
+         * 屏幕上却什么都没有，两边都以为对方会动。
+         */
         login: attempts
-          ? { status: attempts.status, url: attempts.url, message: attempts.message, error: attempts.error, accountId: attempts.accountId }
+          ? {
+              status: attempts.status,
+              url: attempts.url,
+              message: attempts.message,
+              prompt: attempts.prompt,
+              error: attempts.error,
+              accountId: attempts.accountId,
+            }
           : undefined,
       })
     }
@@ -415,9 +427,35 @@ export function registerAccountBridgeRoutes(options) {
           { code: 'NO_AUTHORIZATION' },
         )
       }
-      const attempt = await options.broker.start(family, { method: body.method })
+      // **这个入口是交互式的**：面板背后坐着一个人，族问什么（粘贴令牌、baseURL、
+      // 选区域）都有人能答。工具与命令行那两条路径**不传**这个开关——那里没人可问，
+      // 传了会让它们永远挂在一个不会有人回答的问题上。
+      const attempt = await options.broker.start(family, { method: body.method, interactive: true })
       adapter.invalidate(family.id)
       return { family: family.id, login: attempt }
+    },
+
+    /**
+     * 回答登录流程问的一个问题（`state` 里那一行 `login.prompt`）。
+     * 族是顺序提问的，所以答完要重新看一次 `state`：可能又问下一个，也可能已经开跑。
+     */
+    async answer(body) {
+      const family = familyById.get(body.family)
+      if (!family) throw Object.assign(new Error(`unknown family "${String(body.family)}"`), { code: 'BAD_REQUEST' })
+      if (typeof options.broker?.answer !== 'function') {
+        throw Object.assign(new Error('登录服务尚未就绪（authorization 服务不在这个 composition 里）'), {
+          code: 'NO_AUTHORIZATION',
+        })
+      }
+      const value = typeof body.value === 'string' ? body.value : ''
+      if (!options.broker.answer(family.id, value)) {
+        // 问题已经不在了（人答过了、或这次尝试已经结束）。这不是错误用法，但要如实说，
+        // 否则面板会以为答案被吃掉了。
+        throw Object.assign(new Error(`family "${family.id}" 现在没有待回答的问题`), { code: 'NO_PROMPT' })
+      }
+      // 只回「答上了」：下一个问题（或登录结果）要重新看 `state`，
+      // 这里回一份快照只会是答完那一瞬间的旧样子。
+      return { family: family.id, answered: true }
     },
 
     /** 删一个账号。 */

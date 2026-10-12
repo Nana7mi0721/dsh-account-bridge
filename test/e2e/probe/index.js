@@ -807,5 +807,90 @@ export function apply(ctx) {
       await safe(() => api('proxy', { account: account.id, proxy: '' }), `proxy-clear(${account.id})`)
     }
     await safe(() => api('unfreeze', {}), 'unfreeze-after')
+
+    // ------------------------------------------------------------------ 登录中间的那些问题
+    //
+    // 放在**最后**是因为它会在 `generic` 族里真的建出一个账号：这一族是唯一一个
+    // 「问题全在本地、答完就成号」的登录路（baseURL + 密钥，都不需要真凭据），
+    // 所以前面那些「池子里只有 e2e 那四个号」形状的检查必须在它还不在的时候跑完。
+    //
+    // 守的是一条**两条入口的差别**：
+    //  · 工具与命令行那边没有人可以打字 ⇒ 族的问题必须被**明确拒绝**（`DECLINED`），
+    //    而不是把调用挂在那儿等一个永远不会来的回答。
+    //  · 面板那边有人可以打字 ⇒ 问题必须**挂到 `state` 上**（面板正是从这里画的），
+    //    回答要真的回到流程里，最后真的建出账号。
+    // 从前只有第一条通道：`start()` 之后所有 `prompt` 一律抛 `DECLINED`，于是面板里
+    // 「粘贴令牌 / 手动填 baseURL」这些按钮点下去只会得到一句「请去设置界面做」——
+    // 而**用户就在设置界面**。这条检查就是钉住这个回归的。
+    const textOf = (value) => (typeof value === 'string' ? value : String(value?.content?.[0]?.text ?? value ?? ''))
+    const declined = textOf(await safe(() => tool('account_bridge_login')?.execute?.({ family: 'generic', method: 'manual' }), 'login(generic)'))
+    check(
+      '工具那条路上没人可问时，族的问题被明确拒绝（而且原因说得出来）',
+      /interactive prompt/.test(declined) && /settings UI/.test(declined),
+      declined.slice(0, 300),
+    )
+
+    // 没有问题在等的时候回答，必须**说出来**：静默吞掉的后果是面板以为答上了，
+    // 而流程那边还在等，两边都看不出问题。
+    const stray = await (async () => {
+      try {
+        await api('answer', { family: 'generic', value: 'x' })
+        return null
+      } catch (error) {
+        return String(error?.message ?? error)
+      }
+    })()
+    check('没有问题在等时回答会被明确拒绝，而不是悄悄吃掉', /NO_PROMPT/.test(stray ?? ''), stray ?? '（居然接受了）')
+
+    const liveRow = async () => (await safe(() => api('state'), 'state'))?.families?.find((entry) => entry.family === 'generic')
+    const before = ((await liveRow())?.accounts ?? []).map((account) => account.id)
+    const started = await safe(() => api('login', { family: 'generic', method: 'manual' }), 'login(generic/manual)')
+    // 判据落在 **`state`** 上而不是 `login` 的返回值上：面板读的是 `state`，
+    // 而 `state` 那一行的 `login` 是**逐字段挑出来**的——漏挑一个 `prompt`，
+    // 面板就什么都画不出来，可登录接口的返回值里它明明在（这正是第一轮漏掉的那种假通过）。
+    const waitFor = async (read, why, tries = 40) => {
+      for (let attempt = 0; attempt < tries; attempt += 1) {
+        const value = await read()
+        if (value !== undefined && value !== null) return value
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      say('等不到：', why)
+      return undefined
+    }
+    const firstAsk = await waitFor(async () => (await liveRow())?.login?.prompt, 'state 上的第一个问题')
+    check(
+      '面板这条路上，族问的问题会挂在 state 上等人回答',
+      started?.login?.status === 'running'
+        && typeof firstAsk?.message === 'string'
+        && /baseURL/.test(firstAsk.message),
+      `login=${JSON.stringify(started?.login ?? null).slice(0, 200)}；state 上的问题=${JSON.stringify(firstAsk ?? null)}`.slice(0, 300),
+    )
+
+    const answeredUrl = await safe(() => api('answer', { family: 'generic', value: `${BASE}/v1` }), 'answer(baseUrl)')
+    // 第二个问题要等流程走到那儿，所以轮询着读，别猜一个固定等待时间。
+    const secondAsk = await waitFor(async () => (await liveRow())?.login?.prompt, 'state 上的第二个问题', 30)
+    check(
+      '答完第一个问题后流程真的往下走了（接着问第二个）',
+      answeredUrl?.answered === true && secondAsk?.kind === 'secret',
+      `answered=${JSON.stringify(answeredUrl)}；第二个问题=${JSON.stringify(secondAsk ?? null)}`.slice(0, 300),
+    )
+
+    const answeredKey = await safe(() => api('answer', { family: 'generic', value: KEY }), 'answer(key)')
+    // 认账号要认**多出来的那一个**，不能拿 `accounts[0]`：这一族的池子里本来就有
+    // e2e 那四个账号，`accounts[0]` 一定存在，于是「建出一个号」这条会永远绿。
+    const madeAccount = await waitFor(
+      async () => ((await liveRow())?.accounts ?? []).find((account) => !before.includes(account.id)),
+      '新账号',
+      60,
+    )
+    check(
+      '回答真的回到了流程里：generic 族多出一个账号',
+      answeredKey?.answered === true && madeAccount !== undefined && typeof madeAccount?.id === 'string',
+      `answered=${JSON.stringify(answeredKey)}；原有 ${before.length} 个，新账号=${JSON.stringify(madeAccount ?? null)}`.slice(0, 300),
+    )
+    // 收摊：把这条路上建出来的号删掉，下一轮开头那段清理才不是唯一的安全网。
+    await safe(() => tool('account_bridge_accounts_remove')?.execute?.({ account: madeAccount?.id }), 'remove(generic)')
+    const left = ((await liveRow())?.accounts ?? []).map((account) => account.id)
+    say('登录问答这条路上建出来的账号已收摊：', left.length === before.length ? '干净' : `**还在**（${left.join(', ')}，下一轮开头的清理会扫掉）`)
   }
 }

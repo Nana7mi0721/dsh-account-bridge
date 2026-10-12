@@ -173,13 +173,22 @@ const picked = await session.prompt({ kind: 'select', message: '……', options
 
 - **没有 `initial` / `default` 字段**（我读过 `@deepseek-ai/dsh-authorization` 的类型定义，
   词汇表里就是这三个键）。写了会被忽略。
+- **答案的形状**：`text` 与 `secret` 回**字符串**（可能是空串，空串是合法答案）；
+  `select` 回**选项的 `value` 字符串**——`String(index)` 是惯例，族自己 `Number(answer)` 取下标，
+  它不是下标数字、更不是 `label`。选项既可以是 `{value, label}` 也可以是裸字符串，
+  broker 会归一（裸字符串的 `value` 与 `label` 都是它自己）。
 - `run()` **必须在 resolve 之前 commit**，否则 seam 抛 `NOT_COMMITTED`。
 - 用 `session.notify({ message, url })` 把用户要点开的链接发出去。
 
-### 4.3 agent 侧走不通交互式登录流（**必读**）
+### 4.3 登录中间的问题：两条入口，只有一条答得了（**必读**）
 
-`src/login/broker.js` 给工具调用用的非交互实现，**只会自动回答「只有一个选项的 select」**，
-其余一律抛：
+族里写的就是一句 `session.prompt({...})`，但它在两条入口上的行为**不一样**——
+「有没有人可以打字」是**入口**的属性，不是族的属性：
+
+| 入口 | 谁回答问题 |
+| --- | --- |
+| 设置页的「账号池」面板（`POST /account-bridge/login` → `broker.start(family, {method, interactive:true})`） | **人**。问题挂到 `state` 的 `login.prompt` 上，面板画出不回显的输入框（`kind:'secret'`）或一排按钮（`select`），答案经 `POST /account-bridge/answer` 回到流程里 |
+| `account_bridge_login` 工具与命令行（不传这个开关） | 没人。**只有一个选项的 select** 会在哪个入口都自动回答；其余一律抛 `DECLINED`，工具会把这句话原样报出来 |
 
 ```
 account-bridge: the "<family>" login flow needs an interactive prompt (<kind>: <message>);
@@ -187,7 +196,17 @@ start it from the settings UI instead
 ```
 
 ⇒ 如果你的族在 agent 场景下也要能加账号，**必须另有一条无交互入口**
-（`generic` 族的 `account_bridge_add_endpoint` 工具就是为这个存在的）。
+（`generic` 族的 `account_bridge_add_endpoint` 工具就是为这个存在的）；
+而「粘贴令牌 / 填 baseURL」这类方法**只可能在面板里走通**。
+
+两条与面板有关的硬约束：
+
+- **面板只能画 `state` 里有的东西。** `src/api.js` 那一行 `login` 是**逐字段挑**出来的
+  （`status` / `url` / `message` / `prompt` / `error` / `accountId`）。你新加的问题字段必须同时
+  出现在 `broker.snapshot()` **和**这个挑选里，否则症状是「登录状态写着等你回答，屏幕上却什么都没有」
+  ——两边都以为对方会动。（这一条是真机验收抓出来的：`prompt` 当时只进了 `login` 接口的返回值。）
+- **没人回答的问题不会永远挂着**：10 分钟后这次尝试以 `CANCELLED` 收干净；这次尝试无论怎么结束，
+  还挂着的问题都会被拒掉（`CANCELLED`），不会留下一个「流程已经走了、问题还挂在面板上」的鬼影。
 
 ### 4.4 `discover` 的契约
 

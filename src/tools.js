@@ -234,10 +234,13 @@ export function createToolDefinitions({ adapter, broker, store, families, log, c
           lines.push('', '登录完成后回调会自动回来，不需要粘贴任何东西；之后用 account_bridge_accounts 确认。')
         } else if (snapshot?.message) {
           lines.push('', snapshot.message)
-        } else {
+        } else if (snapshot?.status === 'running') {
           lines.push('', '暂时还没拿到登录 URL，稍后用 account_bridge_accounts 再看一次。')
         }
-        if (snapshot?.status === 'failed' && snapshot.error) lines.push('', `失败原因：${snapshot.error}`)
+        // 已经结束的登录必须把原因说出来。最要紧的一种是 `DECLINED`：它的含义是
+        // 「这条登录要先在设置界面里做」，而只说「稍后再看一次」会让用户（和模型）
+        // 一直等一件不会发生的事——那时屏幕上什么都没有，两边都以为对方会动。
+        if (snapshot?.error) lines.push('', `这条路没走成：${snapshot.error}`)
         return lines.join('\n')
       } catch (error) {
         const message = String(error?.message ?? error)
